@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import sys
+from contextlib import contextmanager
 
 import pandas as pd
 
@@ -15,6 +17,25 @@ from health_check import run_health_check
 from investopedia_adapter import InvestopediaSimulatorAdapter
 from optimizer import build_feasible_initial_weights, optimize_allocation
 from order_preview import generate_order_preview
+
+
+@contextmanager
+def _suppress_expected_notification_failure_logs():
+    """Suppress expected notification failure logs emitted by health-check test probes."""
+
+    logger = logging.getLogger("notifications")
+
+    class ExpectedNotificationFailureFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            message = str(record.getMessage())
+            return not message.startswith("Email send failed but the run will continue:")
+
+    filter_obj = ExpectedNotificationFailureFilter()
+    logger.addFilter(filter_obj)
+    try:
+        yield
+    finally:
+        logger.removeFilter(filter_obj)
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -54,7 +75,8 @@ def run_smoke_test() -> list[str]:
     _assert(feasibility["feasible"], "Feasibility check failed on dummy setup.")
     messages.append("Feasibility check: OK")
 
-    health_df = run_health_check(quick=True, full=False)
+    with _suppress_expected_notification_failure_logs():
+        health_df = run_health_check(quick=True, full=False)
     _assert(not health_df.empty, "Health check quick returned no rows.")
     _assert(
         "python_version" in set(health_df["check_name"].astype(str)),
