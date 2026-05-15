@@ -279,8 +279,9 @@ def build_multi_horizon_forecast(
         "",
         "method:",
         "- Report-only tactical forecast layer; does not change final Daily Bot orders.",
-        "- Combines 1d/3d/5d/10d/20d momentum, probability-up proxy, volatility, trend and overextension risk.",
+        "- Combines 1d/3d/5d/10d/20d momentum, uncalibrated directional-up proxies, volatility, trend and overextension risk.",
         "- Designed for active paper-trading diagnostics before changing the optimizer objective.",
+        "- prob_up_* fields are uncalibrated directional proxies, not calibrated statistical probabilities.",
         "",
         "top_tactical_assets:",
     ]
@@ -497,6 +498,7 @@ def write_tactical_order_alignment(
         "- BUY should generally have positive tactical_score and top-third tactical_rank.",
         "- SELL should generally have negative tactical_score or weak tactical_rank.",
         "- Cash proxies are marked separately because low volatility can inflate tactical rank.",
+        "- prob_up_* fields are uncalibrated directional proxies, not calibrated probabilities.",
         "- This report is diagnostic only and does not alter final orders.",
         "",
         "actionable_orders:",
