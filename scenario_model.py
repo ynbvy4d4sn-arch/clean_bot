@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from asset_universe import DEFENSIVE_GROUPS, EQUITY_LIKE_GROUPS, get_group_map
+from src_new.regimes.regime_probability_model import estimate_scenario_probabilities
 
 
 @dataclass(slots=True)
@@ -28,6 +29,8 @@ def build_3m_scenarios(
     risk_state: str,
     as_of: pd.Timestamp | str,
     random_seed: int = 42,
+    prices: pd.DataFrame | None = None,
+    market_ticker: str | None = None,
 ) -> ScenarioSet:
     """Build a small forward-looking direct scenario set."""
 
@@ -69,6 +72,9 @@ def build_3m_scenarios(
         }
     ).T.reindex(columns=tickers)
 
+    probability_source = "static_default"
+    probability_diagnostics: dict[str, float | str] = {}
+
     probabilities = pd.Series(
         {
             "base": 0.50,
@@ -85,6 +91,22 @@ def build_3m_scenarios(
         probabilities.loc["bear_risk_off"] = 0.24
         probabilities.loc["correlation_stress"] = 0.18
         probabilities.loc["mean_reversion"] = 0.10
+
+    if prices is not None and not prices.empty:
+        try:
+            dynamic_result = estimate_scenario_probabilities(
+                prices=prices,
+                market_ticker=market_ticker,
+            )
+            dynamic_probabilities = dynamic_result.probabilities.reindex(matrix.index).fillna(0.0)
+            if float(dynamic_probabilities.sum()) > 0.0:
+                probabilities = dynamic_probabilities / float(dynamic_probabilities.sum())
+                probability_source = "dynamic_regime_probability_model"
+                probability_diagnostics = dynamic_result.diagnostics
+        except Exception as exc:
+            probability_source = "static_fallback_after_dynamic_probability_error"
+            probability_diagnostics = {"dynamic_probability_error": str(exc)}
+
     probabilities = probabilities / probabilities.sum()
 
     summary = pd.DataFrame(
@@ -93,6 +115,11 @@ def build_3m_scenarios(
             "probability": probabilities.values,
             "mean_asset_return": [float(matrix.loc[name].mean()) for name in probabilities.index],
             "median_asset_return": [float(matrix.loc[name].median()) for name in probabilities.index],
+            "probability_source": probability_source,
+            "dominant_scenario": probability_diagnostics.get("dominant_scenario", str(probabilities.idxmax())),
+            "dominant_probability": float(probability_diagnostics.get("dominant_probability", probabilities.max())),
+            "stress_score": float(probability_diagnostics.get("stress_score", float("nan"))),
+            "risk_on_score": float(probability_diagnostics.get("risk_on_score", float("nan"))),
         }
     )
     return ScenarioSet(
