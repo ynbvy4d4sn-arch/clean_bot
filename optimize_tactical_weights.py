@@ -339,23 +339,39 @@ def run_weight_search(cfg: SearchConfig) -> dict[str, Path]:
         train_stats = backtest_weight_vector(panel=panel, prices=prices, weights=weights, cfg=cfg, split="train")
         test_stats = backtest_weight_vector(panel=panel, prices=prices, weights=weights, cfg=cfg, split="test")
 
+        train_sharpe = float(train_stats.get("sharpe", -999.0) or -999.0)
+        test_sharpe = float(test_stats.get("sharpe", -999.0) or -999.0)
+        test_drawdown = float(test_stats.get("max_drawdown", 0.0) or 0.0)
+        is_degenerate = all(abs(float(value)) <= 1e-12 for value in weights.values())
+        train_test_gap = abs(train_sharpe - test_sharpe)
+        drawdown_penalty = max(0.0, abs(test_drawdown) - 0.10)
+        robust_score = min(train_sharpe, test_sharpe) - 0.25 * train_test_gap - 0.50 * drawdown_penalty
+        if is_degenerate:
+            robust_score -= 0.25
+
         rows.append(
             {
                 "candidate_id": candidate_id,
-                "train_sharpe": train_stats.get("sharpe"),
-                "test_sharpe": test_stats.get("sharpe"),
+                "is_degenerate": bool(is_degenerate),
+                "train_sharpe": train_sharpe,
+                "test_sharpe": test_sharpe,
+                "train_test_gap": train_test_gap,
+                "robust_score": robust_score,
                 "train_total_return": train_stats.get("total_return"),
                 "test_total_return": test_stats.get("total_return"),
                 "train_max_drawdown": train_stats.get("max_drawdown"),
-                "test_max_drawdown": test_stats.get("max_drawdown"),
+                "test_max_drawdown": test_drawdown,
                 "train_total_turnover": train_stats.get("total_turnover"),
                 "test_total_turnover": test_stats.get("total_turnover"),
                 "weights_json": json.dumps(weights, sort_keys=True),
             }
         )
 
-    results = pd.DataFrame(rows).sort_values(["train_sharpe", "test_sharpe"], ascending=False).reset_index(drop=True)
+    results = pd.DataFrame(rows)
+    results = results.sort_values(["robust_score", "test_sharpe", "train_sharpe"], ascending=False).reset_index(drop=True)
     best = results.iloc[0]
+    best_train = results.sort_values(["train_sharpe", "test_sharpe"], ascending=False).iloc[0]
+    best_test = results.sort_values(["test_sharpe", "train_sharpe"], ascending=False).iloc[0]
     best_weights = json.loads(str(best["weights_json"]))
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -386,28 +402,37 @@ def run_weight_search(cfg: SearchConfig) -> dict[str, Path]:
         "- Report test-period Sharpe separately to detect overfitting.",
         "- This does not alter production orders.",
         "",
-        "best_candidate:",
+        "best_candidate_by_robust_score:",
         f"- candidate_id: {int(best['candidate_id'])}",
+        f"- is_degenerate: {bool(best['is_degenerate'])}",
+        f"- robust_score: {float(best['robust_score']):.4f}",
         f"- train_sharpe: {float(best['train_sharpe']):.4f}",
         f"- test_sharpe: {float(best['test_sharpe']):.4f}",
+        f"- train_test_gap: {float(best['train_test_gap']):.4f}",
         f"- train_total_return: {float(best['train_total_return']):.4f}",
         f"- test_total_return: {float(best['test_total_return']):.4f}",
         f"- train_max_drawdown: {float(best['train_max_drawdown']):.4f}",
         f"- test_max_drawdown: {float(best['test_max_drawdown']):.4f}",
         "",
-        "best_weights:",
+        "comparison_winners:",
+        f"- best_train_candidate_id: {int(best_train['candidate_id'])}, train_sharpe={float(best_train['train_sharpe']):.4f}, test_sharpe={float(best_train['test_sharpe']):.4f}, robust_score={float(best_train['robust_score']):.4f}",
+        f"- best_test_candidate_id: {int(best_test['candidate_id'])}, train_sharpe={float(best_test['train_sharpe']):.4f}, test_sharpe={float(best_test['test_sharpe']):.4f}, robust_score={float(best_test['robust_score']):.4f}",
+        "",
+        "best_robust_weights:",
     ]
 
     for name, value in sorted(best_weights.items(), key=lambda kv: abs(kv[1]), reverse=True):
         if abs(float(value)) > 1e-6:
             lines.append(f"- {name}: {float(value):+.4f}")
 
-    lines.extend(["", "top_10_candidates:"])
+    lines.extend(["", "top_10_candidates_by_robust_score:"])
     for row in results.head(10).itertuples(index=False):
         lines.append(
-            f"- id={row.candidate_id}: train_sharpe={row.train_sharpe:.4f}, "
-            f"test_sharpe={row.test_sharpe:.4f}, train_return={row.train_total_return:.4f}, "
-            f"test_return={row.test_total_return:.4f}, test_dd={row.test_max_drawdown:.4f}"
+            f"- id={row.candidate_id}: robust_score={row.robust_score:.4f}, "
+            f"train_sharpe={row.train_sharpe:.4f}, test_sharpe={row.test_sharpe:.4f}, "
+            f"gap={row.train_test_gap:.4f}, train_return={row.train_total_return:.4f}, "
+            f"test_return={row.test_total_return:.4f}, test_dd={row.test_max_drawdown:.4f}, "
+            f"degenerate={row.is_degenerate}"
         )
 
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
