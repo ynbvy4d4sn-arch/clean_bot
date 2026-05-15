@@ -1924,6 +1924,19 @@ def send_daily_review_email_if_needed(
         attachments=[str(path) for path in list(render_bundle.get("attachment_paths", []) or [])],
     )
     send_result["recipient_for_dedupe"] = recipient
+
+    email_state = _build_email_dedupe_state(
+        review=review,
+        issues=issues,
+        settings=effective_settings,
+        subject=subject,
+        body=body,
+        email_result=send_result,
+        previous_state=previous_state,
+    )
+    _write_json(state_path, email_state)
+    send_result["email_state_path"] = str(state_path)
+
     return send_result
 
 
