@@ -625,7 +625,12 @@ def write_scenario_risk_reports(
         distribution.baseline_correlation.to_csv(output_dir / "asset_correlation_matrix.csv")
         distribution.baseline_covariance_horizon.to_csv(output_dir / "asset_covariance_horizon.csv")
         probability_report = distribution.summary.copy()
+        if not probability_report.empty:
+            probability_report.insert(0, "model_scope", "scenario_risk_distribution")
+            probability_report.insert(1, "active_for_final_allocation", False)
+            probability_report.insert(2, "source_module", "scenario_risk_model")
         probability_report.to_csv(output_dir / "scenario_probability_report.csv", index=False)
+        probability_report.to_csv(output_dir / "scenario_risk_probability_report.csv", index=False)
         covariance_summary = distribution.summary[
             [
                 "scenario_name",

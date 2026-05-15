@@ -336,7 +336,13 @@ def _write_scenario_weighted_solver_reports(
         }
         for scenario in scenarios
     ]
-    _write_csv(output_dir / "scenario_probabilities.csv", pd.DataFrame(probability_rows), index=False)
+    probability_df = pd.DataFrame(probability_rows)
+    if not probability_df.empty:
+        probability_df.insert(0, "model_scope", "active_final_allocation_solver")
+        probability_df.insert(1, "active_for_final_allocation", True)
+        probability_df.insert(2, "source_module", "scenario_daily_pipeline")
+    _write_csv(output_dir / "scenario_probabilities.csv", probability_df, index=False)
+    _write_csv(output_dir / "active_scenario_probabilities.csv", probability_df, index=False)
 
     expected_return_rows: list[dict[str, object]] = []
     pairwise_rows: list[dict[str, object]] = []
