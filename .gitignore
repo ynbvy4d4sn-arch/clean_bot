@@ -1,19 +1,40 @@
+# Python
 __pycache__/
 *.pyc
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# macOS
 .DS_Store
 __MACOSX/
 ._*
+
+# Environments
 .venv/
 venv/
 env/
+
+# Runtime outputs
 outputs/
 logs/
 *.log
-*.sqlite
-*.db
+
+# Runtime databases/cache
+data/yfinance_cache/
+data/matplotlib/
+data/*.sqlite
+data/*.db
+data/daily_bot_state.json
+
+# Local notebooks/checkpoints
+notebooks/
+.ipynb_checkpoints/
+
+# Archives
 *.zip
+
+# Secrets
 .env
 .env.*
+secrets.*
