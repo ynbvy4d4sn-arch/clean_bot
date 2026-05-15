@@ -1,0 +1,3 @@
+# Optional commercial/academic optimizer backend.
+# The code falls back when gurobipy is unavailable.
+gurobipy

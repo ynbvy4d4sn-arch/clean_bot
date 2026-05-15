@@ -18,10 +18,17 @@ Current active daily path:
 Run from the project root:
 
     cd ~/uni_trading_bot_project/clean_bot
-    python -m pip install -r requirements.txt
+    python -m pip install -r requirements-dev.txt
     cp .env.example .env
 
 Fill `.env` only with local credentials/settings. Never commit `.env`.
+
+Dependency files:
+
+- `requirements.txt`: runtime dependencies
+- `requirements-dev.txt`: runtime dependencies plus local test tooling
+- `requirements-optional.txt`: optional optimizer backends such as `gurobipy`
+
 
 ## Validation
 
