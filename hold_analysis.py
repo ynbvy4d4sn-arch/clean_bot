@@ -295,9 +295,23 @@ def build_hold_analysis_bundle(review: dict[str, Any], issues: dict[str, Any], o
     blocker_table = _classify_blockers(review, issues, current_positions=current_positions)
 
     why_hold_lines: list[str] = []
-    why_hold_lines.append(
-        f"Die aktuelle Netto-Trade-Now-Edge liegt bei {_score_text(current_trade_now_edge)}. Schon fuer >0 fehlt damit Edge; fuer die echte Execution-Huerde von {DEFAULT_TRADE_NOW_HURDLE:.6f} fehlen aktuell etwa {_score_text(DEFAULT_TRADE_NOW_HURDLE - current_trade_now_edge)}."
-    )
+    hurdle_gap = DEFAULT_TRADE_NOW_HURDLE - current_trade_now_edge
+    if hurdle_gap <= 0.0:
+        edge_text = (
+            f"Die aktuelle Netto-Trade-Now-Edge liegt bei {_score_text(current_trade_now_edge)} und ist damit positiv. "
+            f"Sie liegt um {_score_text(abs(hurdle_gap))} ueber der echten Execution-Huerde von {DEFAULT_TRADE_NOW_HURDLE:.6f}."
+        )
+    elif current_trade_now_edge > 0.0:
+        edge_text = (
+            f"Die aktuelle Netto-Trade-Now-Edge liegt bei {_score_text(current_trade_now_edge)} und ist damit positiv. "
+            f"Bis zur echten Execution-Huerde von {DEFAULT_TRADE_NOW_HURDLE:.6f} fehlen aktuell etwa {_score_text(hurdle_gap)}."
+        )
+    else:
+        edge_text = (
+            f"Die aktuelle Netto-Trade-Now-Edge liegt bei {_score_text(current_trade_now_edge)} und ist damit nicht positiv. "
+            f"Bis zur echten Execution-Huerde von {DEFAULT_TRADE_NOW_HURDLE:.6f} fehlen aktuell etwa {_score_text(hurdle_gap)}."
+        )
+    why_hold_lines.append(edge_text)
     if continuous_candidate and continuous_candidate != "n/a":
         why_hold_lines.append(
             f"Das kontinuierliche Modell will {continuous_candidate}. Sein theoretischer netter Vorteil gegen HOLD liegt aber nur bei {_score_text(continuous_net_delta)}; nach Puffern ({_score_text(combined_buffers)}) bleibt selbst mit Fractional Shares nur {_score_text(continuous_net_delta - combined_buffers)} uebrig."
