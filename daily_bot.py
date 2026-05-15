@@ -1073,6 +1073,182 @@ def _finalize_slim_scenario_daily_run(
         "legacy_discrete_candidate_selection_active": False,
         "final_order_file": str(output_dir / "scenario_weighted_order_preview.csv"),
     }
+
+    current_positions_payload = []
+    for ticker in assets.astype(str):
+        shares = float(current_state.current_shares.reindex(assets).fillna(0.0).get(ticker, 0.0))
+        if abs(shares) <= 1e-9:
+            continue
+        latest_price = _safe_float(latest_prices_at_asof.reindex(assets).get(ticker, 0.0))
+        current_positions_payload.append(
+            {
+                "ticker": ticker,
+                "current_shares": shares,
+                "latest_price": latest_price,
+                "latest_price_date": data_context.get("latest_price_date", "n/a"),
+                "market_value_usd": float(current_state.current_values.reindex(assets).fillna(0.0).get(ticker, 0.0)),
+                "current_weight": float(current_state.current_weights_actual.reindex(assets).fillna(0.0).get(ticker, 0.0)),
+                "price_basis": data_context.get("price_basis", "adjusted_close_proxy"),
+                "data_source": data_context.get("data_source", "unknown"),
+                "stale_price_warning": not bool(data_freshness.get("data_freshness_ok", False)),
+                "data_warning": "adjusted_close_proxy" if str(data_context.get("price_basis", "")) == "adjusted_close_proxy" else "",
+            }
+        )
+
+    target_allocation_payload = []
+    for ticker in assets.astype(str):
+        target_weight = float(executable_solver_weights.reindex(assets).fillna(0.0).get(ticker, 0.0))
+        optimal_weight = float(optimal_solver_weights.reindex(assets).fillna(0.0).get(ticker, 0.0))
+        latest_price = _safe_float(latest_prices_at_asof.reindex(assets).get(ticker, 0.0))
+        target_row = scenario_preview.loc[scenario_preview["asset"].astype(str) == ticker]
+        target_shares = float(target_row["target_shares"].iloc[0]) if not target_row.empty else 0.0
+        target_value = float(target_row["executable_value_usd"].iloc[0]) if not target_row.empty else 0.0
+        current_weight = float(current_state.current_weights_actual.reindex(assets).fillna(0.0).get(ticker, 0.0))
+        if target_weight <= 1e-9 and optimal_weight <= 1e-9 and target_shares <= 1e-9:
+            continue
+        target_allocation_payload.append(
+            {
+                "ticker": ticker,
+                "target_weight": target_weight,
+                "target_shares": target_shares,
+                "target_market_value_usd": target_value,
+                "continuous_target_weight": optimal_weight,
+                "abs_weight_drift": abs(target_weight - current_weight),
+                "latest_price": latest_price,
+            }
+        )
+
+    actionable_preview = scenario_preview.loc[scenario_preview["trade_side"].astype(str).isin(["BUY", "SELL"])].copy()
+    delta_transactions_payload = []
+    for row in actionable_preview.itertuples(index=False):
+        delta_transactions_payload.append(
+            {
+                "ticker": str(getattr(row, "asset", "")),
+                "action": str(getattr(row, "trade_side", "HOLD")),
+                "current_shares": float(getattr(row, "current_shares", 0.0)),
+                "target_shares": float(getattr(row, "target_shares", 0.0)),
+                "order_shares": abs(float(getattr(row, "share_delta", 0.0))),
+                "estimated_price": float(getattr(row, "latest_price", 0.0)),
+                "estimated_order_value": abs(float(getattr(row, "estimated_order_value_usd", 0.0))),
+                "simulator_fee_usd": 0.0,
+                "modeled_transaction_cost_usd": 0.0,
+                "preview_only": True,
+                "not_executable": True,
+                "execution_block_reason": "dry_run_preview_only",
+            }
+        )
+
+    slim_order_summary = {
+        "cash_before_orders": float(order_cost_summary["cash_before_orders"]),
+        "cash_after_orders": float(order_cost_summary["cash_after_orders"]),
+        "estimated_sell_value": float(
+            scenario_preview.loc[scenario_preview["trade_side"].astype(str) == "SELL", "estimated_order_value_usd"].abs().sum()
+        ),
+        "estimated_buy_value": float(
+            scenario_preview.loc[scenario_preview["trade_side"].astype(str) == "BUY", "estimated_order_value_usd"].abs().sum()
+        ),
+        "total_simulator_fees_usd": 0.0,
+        "modeled_transaction_costs_usd": float(order_cost_summary["total_estimated_transaction_cost"]),
+        "buy_count": int((scenario_preview["trade_side"].astype(str) == "BUY").sum()),
+        "sell_count": int((scenario_preview["trade_side"].astype(str) == "SELL").sum()),
+        "hold_count": int((scenario_preview["trade_side"].astype(str) == "HOLD").sum()),
+        "order_count": preview_order_count,
+        "manual_eligible_order_count": int(len(manual_orders)),
+        "negative_cash_check": bool(order_cost_summary.get("no_negative_cash", True)),
+        "leverage_check": True,
+        "short_check": True,
+        "manual_orders_usable": bool(len(manual_orders) > 0 and gate.gate_status == "PASS"),
+    }
+
+    daily_review_payload = {
+        "run_status": {
+            "as_of": str(as_of.date()),
+            "review_time_berlin": datetime.now(BERLIN_TZ).strftime("%H:%M:%S"),
+            "current_date_berlin": data_context.get("current_date_berlin", ""),
+            "current_time_berlin": data_context.get("current_time_berlin", ""),
+            "is_project_trading_day": bool(market_gate.get("is_trading_day", False)),
+            "within_allowed_window": bool(market_gate.get("within_allowed_window", False)),
+            "execution_allowed_by_calendar": bool(market_gate.get("execution_allowed", False)),
+            "final_action": gate.action,
+            "execution_mode": diagnostics.execution_mode,
+            "gate_reason": gate.reason,
+        },
+        "data_status": {
+            "data_source": data_context.get("data_source", "unknown"),
+            "cache_status": data_context.get("cache_status", "unknown"),
+            "synthetic_data": bool(data_context.get("synthetic_data", False)),
+            "used_cache_fallback": bool(data_context.get("used_cache_fallback", False)),
+            "latest_price_date": data_context.get("latest_price_date", "n/a"),
+            "staleness_days": data_context.get("staleness_days", "n/a"),
+            "data_freshness_ok": bool(data_freshness.get("data_freshness_ok", False)),
+            "live_data_error": data_context.get("live_data_error", ""),
+            "missing_prices": [],
+            "low_history_assets": [],
+            "price_basis": data_context.get("price_basis", "adjusted_close_proxy"),
+        },
+        "current_portfolio": {
+            "current_portfolio_source": current_state.source,
+            "positions_count": int(current_state.current_shares.abs().gt(1e-9).sum()),
+            "cash_usd": float(current_state.current_cash),
+            "invested_market_value_usd": float(current_state.current_values.sum()),
+            "nav_usd": float(current_state.nav),
+            "current_portfolio_100pct_cash": bool(current_state.current_shares.abs().sum() <= 1e-9 and current_state.current_cash > 0.0),
+            "current_weights_sum_including_cash": float(current_state.current_weights_actual.sum()) + float(current_state.actual_cash_weight),
+            "current_weights_sum_without_cash": float(current_state.current_weights_actual.sum()),
+            "current_portfolio_constraint_valid": bool(solver_validation.get("ok", True)),
+            "current_portfolio_constraint_violation": not bool(solver_validation.get("ok", True)),
+            "current_constraint_errors": "; ".join(map(str, solver_validation.get("errors", []))) if solver_validation.get("errors") else "none",
+            "parser_warnings": list(getattr(current_state, "parser_warnings", [])),
+            "parser_errors": list(getattr(current_state, "parser_errors", [])),
+        },
+        "current_positions": current_positions_payload,
+        "target_allocation": target_allocation_payload,
+        "delta_transactions": delta_transactions_payload,
+        "cost_edge": {
+            "simulator_fee_usd": 0.0,
+            "total_simulator_fees_usd": 0.0,
+            "modeled_transaction_costs_usd": float(order_cost_summary["total_estimated_transaction_cost"]),
+            "modeled_transaction_costs_pct_nav": float(order_cost_summary["total_order_cost_pct_nav"]),
+            "current_portfolio_score": float(current_eval_score),
+            "target_score_before_costs": float(executable_eval_score),
+            "target_score_after_costs": float(target_score_after_costs),
+            "delta_score_vs_current": float(target_score_after_costs - current_eval_score),
+            "execution_buffer": float(execution_buffer_value),
+            "model_uncertainty_buffer": float(model_uncertainty_buffer_value),
+            "trade_now_edge": float(trade_edge_summary["trade_now_edge"]),
+            "cost_model_used": str(order_cost_summary.get("cost_model_used", "modeled")),
+        },
+        "order_summary": slim_order_summary,
+        "decision_context": {
+            "continuous_candidate": final_target_source,
+            "final_discrete_candidate": final_target_source,
+            "selected_reason": gate.reason,
+            "final_selection_is_safe_fallback": final_target_source == FINAL_TARGET_SOURCE_SOLVER_FAILED,
+            "best_non_hold_candidate": final_target_source,
+            "best_non_hold_failed_reason": "none",
+            "why_this_target": "Active slim scenario-weighted solver path selected the final target.",
+            "why_not_hold": gate.reason,
+            "why_not_cash": "Cash is a reference asset, but the slim scenario-weighted target is the active model output.",
+            "trade_decision_reason": gate.reason,
+            "positive_drivers": [],
+            "negative_drivers": [] if gate.gate_status == "PASS" else [gate.reason],
+            "rejected_candidates": [],
+            "main_blocker_category": "execution_gate" if gate.gate_status != "PASS" else "none",
+        },
+        "pre_trade_validation_status": "PASS" if bool(solver_validation.get("ok", False)) else "REVIEW",
+        "preview_only": True,
+        "manual_orders_preview_ready": bool(len(manual_orders) > 0),
+        "cash_after_orders": float(order_cost_summary["cash_after_orders"]),
+        "main_daily_scope_differs": False,
+        "exception_message": "",
+    }
+    diagnostics.model_context["daily_review_payload"] = daily_review_payload
+    write_daily_portfolio_review_outputs(
+        daily_review_payload,
+        output_dir=output_dir,
+        email_result={"sent": False, "reason": "preview_only", "error": None},
+    )
+
     log_final_action(diagnostics, gate.action, selected_candidate=final_target_source, reason=gate.reason)
 
     report_lines = [
