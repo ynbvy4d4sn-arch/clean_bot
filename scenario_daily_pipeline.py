@@ -106,8 +106,8 @@ def run_scenario_weighted_daily_solve(
                 params=params,
                 market_ticker=market_ticker,
             )
-            scenario_config["scenario_weighted_probabilities"] = dynamic_probabilities.to_dict()
-            scenario_config["scenario_weighted_probabilities_source"] = "dynamic_regime_probability_model"
+            scenario_config["dynamic_scenario_weighted_probabilities"] = dynamic_probabilities.to_dict()
+            scenario_config["dynamic_scenario_weighted_probabilities_source"] = "dynamic_regime_probability_model"
 
         scenario_inputs = build_scenario_inputs(
             forecast_table=forecast_table.reindex(solver_assets),

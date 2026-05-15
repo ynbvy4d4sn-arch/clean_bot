@@ -3754,6 +3754,8 @@ def _run_single_impl(args: argparse.Namespace, diagnostics) -> dict[str, object]
         optimizer_constraint_params=optimizer_constraint_params,
         effective_cash_ticker=effective_cash_ticker,
         execution_fraction=execution_fraction_value,
+        prices=prices.reindex(columns=active_tickers),
+        market_ticker=str(params.get("market_ticker") or "SPY"),
         success_target_source=FINAL_TARGET_SOURCE_SCENARIO,
         failure_target_source=FINAL_TARGET_SOURCE_SOLVER_FAILED,
     )
