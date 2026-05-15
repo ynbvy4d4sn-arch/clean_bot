@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src_new.regimes.regime_probability_model import compute_regime_indicators
+
 from constraint_repair import repair_weights_to_constraints
 from scenarios import build_scenario_inputs
 from scenario_weighted_solver import (
@@ -51,6 +53,8 @@ def run_scenario_weighted_daily_solve(
     optimizer_constraint_params: dict[str, Any],
     effective_cash_ticker: str,
     execution_fraction: float,
+    prices: pd.DataFrame | None = None,
+    market_ticker: str | None = None,
     success_target_source: str = "SCENARIO_WEIGHTED_RF_SHARPE_OPTIMAL",
     failure_target_source: str = "HOLD_SOLVER_FAILED",
 ) -> ScenarioWeightedDailySolveResult:
@@ -94,10 +98,21 @@ def run_scenario_weighted_daily_solve(
     scenario_inputs: list[ScenarioInput] = []
     solver_result = solver_failure_result("Scenario-weighted solver was not run.", solver_current_weights)
     try:
+        scenario_config = {**optimizer_constraint_params, "solver": params.get("solver", {})}
+        if prices is not None and not prices.empty:
+            dynamic_probabilities = _dynamic_scenario_weighted_probabilities(
+                prices=prices,
+                returns=returns.reindex(columns=solver_assets),
+                params=params,
+                market_ticker=market_ticker,
+            )
+            scenario_config["scenario_weighted_probabilities"] = dynamic_probabilities.to_dict()
+            scenario_config["scenario_weighted_probabilities_source"] = "dynamic_regime_probability_model"
+
         scenario_inputs = build_scenario_inputs(
             forecast_table=forecast_table.reindex(solver_assets),
             returns=returns.reindex(columns=solver_assets),
-            config={**optimizer_constraint_params, "solver": params.get("solver", {})},
+            config=scenario_config,
         )
         repaired_start = repair_weights_to_constraints(
             solver_current_weights,
@@ -186,6 +201,94 @@ def run_scenario_weighted_daily_solve(
         solver_assets=solver_assets,
         warnings=warnings,
     )
+
+
+
+def _dynamic_scenario_weighted_probabilities(
+    *,
+    returns: pd.DataFrame | None = None,
+    prices: pd.DataFrame | None = None,
+    params: dict[str, Any] | None = None,
+    market_ticker: str | None = None,
+) -> pd.Series:
+    """Map current market regime indicators to active six-scenario solver probabilities.
+
+    Accepts either price history or return history. Tests and diagnostics may pass
+    returns directly; the daily bot normally passes prices.
+    """
+
+    params = dict(params or {})
+    effective_market_ticker = str(params.get("market_ticker") or market_ticker or "") or None
+
+    if prices is None or prices.empty:
+        if returns is None or returns.empty:
+            price_proxy = pd.DataFrame()
+        else:
+            clean_returns = (
+                returns.copy()
+                .apply(pd.to_numeric, errors="coerce")
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0.0)
+            )
+            price_proxy = 100.0 * (1.0 + clean_returns).cumprod()
+    else:
+        price_proxy = prices
+
+    indicators = compute_regime_indicators(
+        prices=price_proxy,
+        market_ticker=effective_market_ticker,
+    )
+
+    stress = float(indicators.stress_score)
+    risk_on = float(indicators.risk_on_score)
+    momentum = float(indicators.momentum_score)
+    volatility = float(indicators.volatility_score)
+    drawdown = float(indicators.drawdown_score)
+    correlation = float(indicators.correlation_score)
+
+    raw = pd.Series(
+        {
+            "bull_momentum": 0.12 + 0.30 * risk_on + 0.10 * momentum,
+            "soft_landing": 0.18 + 0.18 * risk_on + 0.08 * (1.0 - volatility),
+            "sideways_choppy": 0.14 + 0.12 * (1.0 - abs(risk_on - stress)),
+            "inflation_shock": 0.08 + 0.10 * volatility + 0.04 * correlation,
+            "growth_selloff": 0.08 + 0.22 * stress + 0.08 * drawdown,
+            "liquidity_stress": 0.05 + 0.18 * stress + 0.08 * correlation,
+        },
+        dtype=float,
+    )
+
+    if stress > 0.65:
+        raw.loc["bull_momentum"] *= 0.65
+        raw.loc["soft_landing"] *= 0.80
+        raw.loc["growth_selloff"] *= 1.20
+        raw.loc["liquidity_stress"] *= 1.25
+
+    raw = raw.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower=0.0)
+    total = float(raw.sum())
+    if total <= 0.0:
+        raw = pd.Series(
+            {
+                "bull_momentum": 0.25,
+                "soft_landing": 0.25,
+                "sideways_choppy": 0.20,
+                "inflation_shock": 0.15,
+                "growth_selloff": 0.10,
+                "liquidity_stress": 0.05,
+            },
+            dtype=float,
+        )
+        total = float(raw.sum())
+
+    result = raw / total
+    result.attrs["probability_source"] = "dynamic_regime_probability_model"
+    result.attrs["stress_score"] = stress
+    result.attrs["risk_on_score"] = risk_on
+    result.attrs["momentum_score"] = momentum
+    result.attrs["volatility_score"] = volatility
+    result.attrs["drawdown_score"] = drawdown
+    result.attrs["correlation_score"] = correlation
+    return result
 
 
 def scenario_weighted_solver_config(params: dict[str, Any]) -> SolverConfig:

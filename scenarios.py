@@ -218,7 +218,12 @@ def _baseline_covariance(
 def _scenario_probabilities(params: dict[str, Any]) -> pd.Series:
     raw_key = ""
     raw = None
-    for key in ("scenario_weighted_probabilities", "scenario_input_probabilities", "scenario_probabilities"):
+    for key in (
+        "dynamic_scenario_weighted_probabilities",
+        "scenario_weighted_probabilities",
+        "scenario_input_probabilities",
+        "scenario_probabilities",
+    ):
         if params.get(key) is not None:
             raw_key = key
             raw = params.get(key)
@@ -227,8 +232,10 @@ def _scenario_probabilities(params: dict[str, Any]) -> pd.Series:
     if raw is None:
         raw = DEFAULT_SCENARIO_PROBABILITIES
         probability_source = "default_configurable_heuristic"
+    elif raw_key == "dynamic_scenario_weighted_probabilities":
+        probability_source = "dynamic_regime_probability_model"
     else:
-        probability_source = f"config.{raw_key}"
+        probability_source = str(params.get(f"{raw_key}_source", f"config.{raw_key}"))
     raw_series = pd.Series(raw, dtype=float)
     if not set(SCENARIO_NAMES).issubset(set(raw_series.index.astype(str))):
         if raw_key == "scenario_probabilities":
