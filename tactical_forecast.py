@@ -530,3 +530,231 @@ def write_tactical_order_alignment(
         "tactical_order_alignment": str(alignment_path),
         "tactical_order_alignment_report": str(report_path),
     }
+
+
+def _forward_return(prices: pd.DataFrame, start_position: int, horizon: int) -> pd.Series:
+    if start_position + horizon >= len(prices):
+        return pd.Series(dtype=float)
+    start_px = prices.iloc[start_position]
+    end_px = prices.iloc[start_position + horizon]
+    return (end_px / start_px - 1.0).replace([np.inf, -np.inf], np.nan)
+
+
+def _spearman_rank_ic(x: pd.Series, y: pd.Series) -> float:
+    frame = pd.concat([x.astype(float), y.astype(float)], axis=1).replace([np.inf, -np.inf], np.nan).dropna()
+    if len(frame) < 5:
+        return float("nan")
+    return float(frame.iloc[:, 0].rank().corr(frame.iloc[:, 1].rank()))
+
+
+def build_tactical_forecast_calibration(
+    *,
+    prices: pd.DataFrame,
+    params: dict[str, object] | None = None,
+    tickers: Sequence[str] | None = None,
+    as_of: pd.Timestamp | str | None = None,
+    horizons: Sequence[int] = (3, 5, 10),
+    min_history: int = 180,
+    max_samples: int = 180,
+    step: int = 5,
+) -> tuple[pd.DataFrame, str]:
+    """Walk-forward calibration of tactical scores against realized forward returns.
+
+    Report-only diagnostic. Uses historical dates strictly before/as of the current run date.
+    """
+
+    if prices.empty:
+        raise ValueError("prices must not be empty.")
+
+    params = dict(params or {})
+    end_date = pd.Timestamp(as_of if as_of is not None else prices.index[-1])
+    active_tickers = [str(ticker) for ticker in (tickers or prices.columns.tolist()) if str(ticker) in prices.columns]
+    history = prices.reindex(columns=active_tickers).loc[:end_date].sort_index().ffill(limit=3).dropna(how="all")
+
+    max_horizon = max(int(h) for h in horizons)
+    if len(history) < min_history + max_horizon + 2:
+        empty = pd.DataFrame(
+            columns=[
+                "horizon_days",
+                "sample_count",
+                "rank_ic_mean",
+                "rank_ic_median",
+                "top_quintile_forward_return_mean",
+                "bottom_quintile_forward_return_mean",
+                "top_minus_bottom_mean",
+                "top_hit_rate_mean",
+                "all_assets_forward_return_mean",
+            ]
+        )
+        report = (
+            "Tactical Forecast Calibration Report\n\n"
+            f"status: insufficient_history\n"
+            f"available_rows: {len(history)}\n"
+            f"required_rows: {min_history + max_horizon + 2}\n"
+        )
+        return empty, report
+
+    returns = compute_returns(history)
+    eligible_positions = list(range(min_history, len(history) - max_horizon, max(step, 1)))
+    if len(eligible_positions) > max_samples:
+        eligible_positions = eligible_positions[-max_samples:]
+
+    rows: list[dict[str, object]] = []
+
+    for pos in eligible_positions:
+        decision_date = pd.Timestamp(history.index[pos])
+        try:
+            tactical = build_multi_horizon_forecast(
+                prices=history.iloc[: pos + 1],
+                returns=returns.loc[:decision_date],
+                date=decision_date,
+                params=params,
+                tickers=active_tickers,
+            )
+        except Exception:
+            continue
+
+        score = tactical.table.set_index("ticker")["tactical_score"].astype(float)
+        rank = tactical.table.set_index("ticker")["tactical_rank"].astype(float)
+
+        for horizon in horizons:
+            h = int(horizon)
+            fwd = _forward_return(history, pos, h)
+            if fwd.empty:
+                continue
+
+            frame = pd.DataFrame(
+                {
+                    "tactical_score": score,
+                    "tactical_rank": rank,
+                    "forward_return": fwd.reindex(score.index),
+                }
+            ).replace([np.inf, -np.inf], np.nan).dropna()
+
+            if len(frame) < 10:
+                continue
+
+            rank_ic = _spearman_rank_ic(frame["tactical_score"], frame["forward_return"])
+            quintile_size = max(int(np.ceil(len(frame) * 0.20)), 1)
+            top = frame.sort_values("tactical_score", ascending=False).head(quintile_size)
+            bottom = frame.sort_values("tactical_score", ascending=True).head(quintile_size)
+
+            top_mean = float(top["forward_return"].mean())
+            bottom_mean = float(bottom["forward_return"].mean())
+            all_mean = float(frame["forward_return"].mean())
+            rows.append(
+                {
+                    "decision_date": str(decision_date.date()),
+                    "horizon_days": h,
+                    "asset_count": int(len(frame)),
+                    "rank_ic": rank_ic,
+                    "top_quintile_forward_return": top_mean,
+                    "bottom_quintile_forward_return": bottom_mean,
+                    "top_minus_bottom": top_mean - bottom_mean,
+                    "top_hit_rate": float((top["forward_return"] > 0.0).mean()),
+                    "bottom_hit_rate": float((bottom["forward_return"] > 0.0).mean()),
+                    "all_assets_forward_return_mean": all_mean,
+                }
+            )
+
+    raw = pd.DataFrame(rows)
+    if raw.empty:
+        report = (
+            "Tactical Forecast Calibration Report\n\n"
+            "status: no_valid_walk_forward_samples\n"
+        )
+        return raw, report
+
+    summary_rows: list[dict[str, object]] = []
+    for horizon, group in raw.groupby("horizon_days"):
+        summary_rows.append(
+            {
+                "horizon_days": int(horizon),
+                "sample_count": int(len(group)),
+                "rank_ic_mean": float(group["rank_ic"].mean()),
+                "rank_ic_median": float(group["rank_ic"].median()),
+                "top_quintile_forward_return_mean": float(group["top_quintile_forward_return"].mean()),
+                "bottom_quintile_forward_return_mean": float(group["bottom_quintile_forward_return"].mean()),
+                "top_minus_bottom_mean": float(group["top_minus_bottom"].mean()),
+                "top_hit_rate_mean": float(group["top_hit_rate"].mean()),
+                "bottom_hit_rate_mean": float(group["bottom_hit_rate"].mean()),
+                "all_assets_forward_return_mean": float(group["all_assets_forward_return_mean"].mean()),
+            }
+        )
+
+    summary = pd.DataFrame(summary_rows).sort_values("horizon_days").reset_index(drop=True)
+
+    lines = [
+        "Tactical Forecast Calibration Report",
+        "",
+        "status: report_only_no_order_change",
+        f"as_of: {end_date.date()}",
+        f"asset_count: {len(active_tickers)}",
+        f"walk_forward_samples: {len(raw)}",
+        f"sample_step_days: {step}",
+        "",
+        "method:",
+        "- Recomputes tactical_score on historical decision dates using only data available up to each date.",
+        "- Compares tactical_score rank to realized forward returns.",
+        "- rank_ic is Spearman rank correlation between tactical_score and forward return.",
+        "- top_minus_bottom is top-quintile forward return minus bottom-quintile forward return.",
+        "- This report is diagnostic only and does not alter final orders.",
+        "",
+        "summary_by_horizon:",
+    ]
+
+    for row in summary.itertuples(index=False):
+        lines.append(
+            f"- {row.horizon_days}d: samples={row.sample_count}, "
+            f"rank_ic_mean={row.rank_ic_mean:.4f}, "
+            f"top_mean={row.top_quintile_forward_return_mean:.4f}, "
+            f"bottom_mean={row.bottom_quintile_forward_return_mean:.4f}, "
+            f"top_minus_bottom={row.top_minus_bottom_mean:.4f}, "
+            f"top_hit_rate={row.top_hit_rate_mean:.3f}"
+        )
+
+    best = summary.sort_values("top_minus_bottom_mean", ascending=False).head(1)
+    if not best.empty:
+        best_row = best.iloc[0]
+        lines.extend(
+            [
+                "",
+                "current_read:",
+                f"- best_horizon_by_top_minus_bottom: {int(best_row['horizon_days'])}d",
+                f"- best_top_minus_bottom_mean: {float(best_row['top_minus_bottom_mean']):.4f}",
+                f"- best_rank_ic_mean: {float(best_row['rank_ic_mean']):.4f}",
+            ]
+        )
+
+    return summary, "\n".join(lines) + "\n"
+
+
+def write_tactical_forecast_calibration_outputs(
+    *,
+    prices: pd.DataFrame,
+    params: dict[str, object] | None,
+    tickers: Sequence[str],
+    as_of: pd.Timestamp | str,
+    output_dir: str | Path,
+) -> dict[str, str]:
+    """Write walk-forward tactical forecast calibration outputs."""
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    calibration_path = output_path / "tactical_forecast_calibration.csv"
+    report_path = output_path / "tactical_forecast_calibration_report.txt"
+
+    calibration, report = build_tactical_forecast_calibration(
+        prices=prices,
+        params=params,
+        tickers=tickers,
+        as_of=as_of,
+    )
+    calibration.to_csv(calibration_path, index=False)
+    report_path.write_text(report, encoding="utf-8")
+
+    return {
+        "tactical_forecast_calibration": str(calibration_path),
+        "tactical_forecast_calibration_report": str(report_path),
+    }
