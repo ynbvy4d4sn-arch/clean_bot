@@ -352,3 +352,179 @@ def write_tactical_forecast_outputs(
         "tactical_asset_scores": str(score_path),
         "tactical_model_report": str(report_path),
     }
+
+
+def write_tactical_order_alignment(
+    *,
+    scenario_preview: pd.DataFrame,
+    output_dir: str | Path,
+) -> dict[str, str]:
+    """Compare executable order preview against tactical asset scores.
+
+    Report-only diagnostic. Does not change orders.
+    """
+
+    output_path = Path(output_dir)
+    scores_path = output_path / "tactical_asset_scores.csv"
+    alignment_path = output_path / "tactical_order_alignment.csv"
+    report_path = output_path / "tactical_order_alignment_report.txt"
+
+    if not scores_path.exists():
+        report_path.write_text(
+            "Tactical Order Alignment Report\n\nstatus: tactical_asset_scores.csv missing\n",
+            encoding="utf-8",
+        )
+        return {
+            "tactical_order_alignment": str(alignment_path),
+            "tactical_order_alignment_report": str(report_path),
+        }
+
+    scores = pd.read_csv(scores_path)
+    if scores.empty or "ticker" not in scores.columns:
+        report_path.write_text(
+            "Tactical Order Alignment Report\n\nstatus: tactical_asset_scores.csv empty or malformed\n",
+            encoding="utf-8",
+        )
+        return {
+            "tactical_order_alignment": str(alignment_path),
+            "tactical_order_alignment_report": str(report_path),
+        }
+
+    preview = scenario_preview.copy()
+    if "asset" not in preview.columns:
+        raise ValueError("scenario_preview must include asset column.")
+
+    preview["ticker"] = preview["asset"].astype(str)
+    preview["trade_side"] = preview.get("trade_side", "HOLD").astype(str).str.upper()
+
+    scores["ticker"] = scores["ticker"].astype(str)
+    merged = preview.merge(scores, on="ticker", how="left", suffixes=("", "_tactical"))
+
+    asset_count = max(int(scores["ticker"].nunique()), 1)
+    top_third_rank = max(int(np.ceil(asset_count / 3.0)), 1)
+    bottom_third_rank = max(int(np.floor(asset_count * 2.0 / 3.0)), 1)
+    cash_proxy_tickers = {"SGOV", "SHY", "BIL", "TFLO", "ICSH"}
+
+    def classify(row: pd.Series) -> str:
+        side = str(row.get("trade_side", "HOLD")).upper()
+        ticker = str(row.get("ticker", ""))
+        score = _safe_float(row.get("tactical_score"), 0.0)
+        rank = int(_safe_float(row.get("tactical_rank"), asset_count))
+
+        if ticker in cash_proxy_tickers:
+            if side == "BUY":
+                return "cash_proxy_buy_defensive_or_idle_cash"
+            if side == "SELL":
+                return "cash_proxy_sell_funds_risk_trade"
+            return "cash_proxy_hold"
+
+        if side == "BUY":
+            if score > 0.0 and rank <= top_third_rank:
+                return "tactical_confirms_buy"
+            if score > 0.0:
+                return "tactical_mildly_supports_buy"
+            return "tactical_conflicts_buy"
+
+        if side == "SELL":
+            if score < 0.0 or rank >= bottom_third_rank:
+                return "tactical_confirms_sell"
+            if score <= 0.25:
+                return "tactical_mildly_supports_sell"
+            return "tactical_conflicts_sell"
+
+        if score > 0.75 and rank <= top_third_rank:
+            return "high_tactical_score_but_hold"
+        if score < -0.75 and rank >= bottom_third_rank:
+            return "weak_tactical_score_and_hold_ok"
+        return "neutral_hold"
+
+    merged["alignment"] = merged.apply(classify, axis=1)
+    merged["is_cash_proxy"] = merged["ticker"].isin(cash_proxy_tickers)
+
+    output_columns = [
+        "ticker",
+        "trade_side",
+        "alignment",
+        "is_cash_proxy",
+        "tactical_rank",
+        "tactical_score",
+        "forecast_confidence",
+        "prob_up_3d",
+        "prob_up_5d",
+        "prob_up_10d",
+        "expected_return_3d",
+        "expected_return_5d",
+        "expected_return_10d",
+        "expected_return_to_project_end",
+        "momentum_3d",
+        "momentum_5d",
+        "momentum_20d",
+        "vol_20d",
+        "risk_adjusted_forecast",
+        "reason",
+        "current_weight",
+        "executable_weight",
+        "trade_value_usd",
+        "estimated_order_value_usd",
+        "skipped_reason",
+    ]
+    existing_columns = [column for column in output_columns if column in merged.columns]
+    alignment_df = merged.loc[:, existing_columns].copy()
+    alignment_df.to_csv(alignment_path, index=False)
+
+    actionable = alignment_df[alignment_df["trade_side"].isin(["BUY", "SELL"])].copy()
+    conflict_mask = alignment_df["alignment"].astype(str).str.contains("conflicts|high_tactical_score_but_hold", case=False, regex=True)
+    conflict_rows = alignment_df.loc[conflict_mask].copy()
+
+    buy_confirmed = int((alignment_df["alignment"] == "tactical_confirms_buy").sum())
+    buy_conflict = int((alignment_df["alignment"] == "tactical_conflicts_buy").sum())
+    sell_confirmed = int((alignment_df["alignment"] == "tactical_confirms_sell").sum())
+    sell_conflict = int((alignment_df["alignment"] == "tactical_conflicts_sell").sum())
+
+    lines = [
+        "Tactical Order Alignment Report",
+        "",
+        "status: report_only_no_order_change",
+        f"asset_count: {asset_count}",
+        f"actionable_order_count: {len(actionable)}",
+        f"buy_confirmed_count: {buy_confirmed}",
+        f"buy_conflict_count: {buy_conflict}",
+        f"sell_confirmed_count: {sell_confirmed}",
+        f"sell_conflict_count: {sell_conflict}",
+        f"conflict_or_watch_count: {len(conflict_rows)}",
+        "",
+        "interpretation:",
+        "- BUY should generally have positive tactical_score and top-third tactical_rank.",
+        "- SELL should generally have negative tactical_score or weak tactical_rank.",
+        "- Cash proxies are marked separately because low volatility can inflate tactical rank.",
+        "- This report is diagnostic only and does not alter final orders.",
+        "",
+        "actionable_orders:",
+    ]
+
+    for row in actionable.sort_values(["trade_side", "tactical_rank"], ascending=[True, True]).itertuples(index=False):
+        lines.append(
+            f"- {row.trade_side} {row.ticker}: alignment={row.alignment}, "
+            f"rank={getattr(row, 'tactical_rank', 'n/a')}, "
+            f"score={_safe_float(getattr(row, 'tactical_score', 0.0)):.4f}, "
+            f"prob_up_5d={_safe_float(getattr(row, 'prob_up_5d', 0.0)):.3f}"
+        )
+
+    lines.extend(["", "conflicts_or_watchlist:"])
+    if conflict_rows.empty:
+        lines.append("- none")
+    else:
+        for row in conflict_rows.sort_values("tactical_rank", ascending=True).itertuples(index=False):
+            lines.append(
+                f"- {row.ticker}: side={row.trade_side}, alignment={row.alignment}, "
+                f"rank={getattr(row, 'tactical_rank', 'n/a')}, "
+                f"score={_safe_float(getattr(row, 'tactical_score', 0.0)):.4f}, "
+                f"reason={getattr(row, 'reason', 'n/a')}"
+            )
+
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    return {
+        "tactical_order_alignment": str(alignment_path),
+        "tactical_order_alignment_report": str(report_path),
+    }

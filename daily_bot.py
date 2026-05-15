@@ -72,7 +72,11 @@ from factor_data import build_factor_data
 from factor_forecast import build_factor_forecast
 from feasibility import check_portfolio_feasibility
 from forecast_3m import build_forecast_3m
-from tactical_forecast import build_multi_horizon_forecast, write_tactical_forecast_outputs
+from tactical_forecast import (
+    build_multi_horizon_forecast,
+    write_tactical_forecast_outputs,
+    write_tactical_order_alignment,
+)
 from macro_data import DEFAULT_PROXY_TICKERS, load_macro_proxy_data
 from model_governance import compute_model_confidence, save_model_governance_report
 from order_sizing import convert_weights_to_orders
@@ -919,6 +923,24 @@ def _finalize_slim_scenario_daily_run(
     elif not bool(market_gate.get("execution_allowed", False)):
         actionable = scenario_preview["trade_side"].astype(str).isin(["BUY", "SELL"])
         scenario_preview.loc[actionable, "skipped_reason"] = "outside_trading_window"
+
+    try:
+        tactical_alignment_paths = write_tactical_order_alignment(
+            scenario_preview=scenario_preview,
+            output_dir=output_dir,
+        )
+        diagnostics.model_context["tactical_order_alignment"] = {
+            "decision_impact": "report_only_no_order_change",
+            "report_files": tactical_alignment_paths,
+        }
+    except Exception as exc:
+        log_warning(
+            diagnostics,
+            "daily_bot",
+            f"tactical order alignment report failed: {exc}",
+            severity="WARNING",
+            stage="slim scenario finalization",
+        )
 
     _write_csv(output_dir / "scenario_weighted_order_preview.csv", scenario_preview, index=False)
     _write_scenario_weighted_allocation_csv(
