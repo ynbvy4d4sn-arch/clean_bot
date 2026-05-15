@@ -204,7 +204,31 @@ def build_multi_horizon_forecast(
     ).clip(lower=0.05, upper=1.00)
 
     relative_strength_rank = ret_20d.rank(ascending=False, method="dense")
-    risk_adjusted_forecast = expected_return_5d / vol_5d.replace(0.0, np.nan)
+
+    risk_free_rate_annual = _safe_float(
+        params.get("risk_free_rate_annual", params.get("RISK_FREE_RATE_ANNUAL", 0.02)),
+        0.02,
+    )
+
+    def risk_free_return_for_days(days: int) -> pd.Series:
+        rf_value = (1.0 + risk_free_rate_annual) ** (float(days) / 252.0) - 1.0
+        return pd.Series(rf_value, index=active_tickers, dtype=float)
+
+    risk_free_return_1d = risk_free_return_for_days(1)
+    risk_free_return_3d = risk_free_return_for_days(3)
+    risk_free_return_5d = risk_free_return_for_days(5)
+    risk_free_return_10d = risk_free_return_for_days(10)
+    risk_free_return_20d = risk_free_return_for_days(20)
+    risk_free_return_to_project_end = risk_free_return_for_days(max(remaining_days, 1))
+
+    excess_expected_return_1d = expected_return_1d - risk_free_return_1d
+    excess_expected_return_3d = expected_return_3d - risk_free_return_3d
+    excess_expected_return_5d = expected_return_5d - risk_free_return_5d
+    excess_expected_return_10d = expected_return_10d - risk_free_return_10d
+    excess_expected_return_20d = expected_return_20d - risk_free_return_20d
+    excess_expected_return_to_project_end = expected_return_to_project_end - risk_free_return_to_project_end
+
+    risk_adjusted_forecast = excess_expected_return_5d / vol_5d.replace(0.0, np.nan)
     risk_adjusted_forecast = risk_adjusted_forecast.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     tactical_score = (
@@ -247,12 +271,25 @@ def build_multi_horizon_forecast(
             "trend_score": trend_score.reindex(active_tickers).to_numpy(dtype=float),
             "drawdown_60d": drawdown_60d.reindex(active_tickers).to_numpy(dtype=float),
             "relative_strength_rank": relative_strength_rank.reindex(active_tickers).to_numpy(dtype=float),
+            "risk_free_rate_annual": float(risk_free_rate_annual),
+            "risk_free_return_1d": risk_free_return_1d.reindex(active_tickers).to_numpy(dtype=float),
+            "risk_free_return_3d": risk_free_return_3d.reindex(active_tickers).to_numpy(dtype=float),
+            "risk_free_return_5d": risk_free_return_5d.reindex(active_tickers).to_numpy(dtype=float),
+            "risk_free_return_10d": risk_free_return_10d.reindex(active_tickers).to_numpy(dtype=float),
+            "risk_free_return_20d": risk_free_return_20d.reindex(active_tickers).to_numpy(dtype=float),
+            "risk_free_return_to_project_end": risk_free_return_to_project_end.reindex(active_tickers).to_numpy(dtype=float),
             "expected_return_1d": expected_return_1d.reindex(active_tickers).to_numpy(dtype=float),
             "expected_return_3d": expected_return_3d.reindex(active_tickers).to_numpy(dtype=float),
             "expected_return_5d": expected_return_5d.reindex(active_tickers).to_numpy(dtype=float),
             "expected_return_10d": expected_return_10d.reindex(active_tickers).to_numpy(dtype=float),
             "expected_return_20d": expected_return_20d.reindex(active_tickers).to_numpy(dtype=float),
             "expected_return_to_project_end": expected_return_to_project_end.reindex(active_tickers).to_numpy(dtype=float),
+            "excess_expected_return_1d": excess_expected_return_1d.reindex(active_tickers).to_numpy(dtype=float),
+            "excess_expected_return_3d": excess_expected_return_3d.reindex(active_tickers).to_numpy(dtype=float),
+            "excess_expected_return_5d": excess_expected_return_5d.reindex(active_tickers).to_numpy(dtype=float),
+            "excess_expected_return_10d": excess_expected_return_10d.reindex(active_tickers).to_numpy(dtype=float),
+            "excess_expected_return_20d": excess_expected_return_20d.reindex(active_tickers).to_numpy(dtype=float),
+            "excess_expected_return_to_project_end": excess_expected_return_to_project_end.reindex(active_tickers).to_numpy(dtype=float),
             "prob_up_1d": prob_up_1d.reindex(active_tickers).to_numpy(dtype=float),
             "prob_up_3d": prob_up_3d.reindex(active_tickers).to_numpy(dtype=float),
             "prob_up_5d": prob_up_5d.reindex(active_tickers).to_numpy(dtype=float),
@@ -279,7 +316,7 @@ def build_multi_horizon_forecast(
         "",
         "method:",
         "- Report-only tactical forecast layer; does not change final Daily Bot orders.",
-        "- Combines 1d/3d/5d/10d/20d momentum, uncalibrated directional-up proxies, volatility, trend and overextension risk.",
+        "- Combines 1d/3d/5d/10d/20d momentum, uncalibrated directional-up proxies, volatility, trend, overextension risk and 2%-RF excess-return diagnostics.",
         "- Designed for active paper-trading diagnostics before changing the optimizer objective.",
         "- prob_up_* fields are uncalibrated directional proxies, not calibrated statistical probabilities.",
         "",
@@ -340,6 +377,8 @@ def write_tactical_forecast_outputs(
         "momentum_20d",
         "vol_20d",
         "risk_adjusted_forecast",
+        "excess_expected_return_5d",
+        "risk_free_return_5d",
         "reason",
     ]
     result.table.loc[:, [column for column in score_columns if column in result.table.columns]].to_csv(
@@ -462,6 +501,8 @@ def write_tactical_order_alignment(
         "momentum_20d",
         "vol_20d",
         "risk_adjusted_forecast",
+        "excess_expected_return_5d",
+        "risk_free_return_5d",
         "reason",
         "current_weight",
         "executable_weight",
