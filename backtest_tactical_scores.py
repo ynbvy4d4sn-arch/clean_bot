@@ -31,13 +31,19 @@ def _max_drawdown(equity: pd.Series) -> float:
     return float(drawdown.min())
 
 
-def _performance_stats(daily_returns: pd.Series, equity: pd.Series, turnover: pd.Series) -> dict[str, float]:
+def _performance_stats(
+    daily_returns: pd.Series,
+    equity: pd.Series,
+    turnover: pd.Series,
+    risk_free_rate_annual: float = 0.02,
+) -> dict[str, float]:
     clean = daily_returns.replace([np.inf, -np.inf], np.nan).dropna()
     if clean.empty:
         return {
             "total_return": 0.0,
             "annualized_return": 0.0,
             "annualized_vol": 0.0,
+            "excess_annualized_return": 0.0,
             "sharpe": 0.0,
             "max_drawdown": 0.0,
             "avg_daily_turnover": 0.0,
@@ -48,10 +54,14 @@ def _performance_stats(daily_returns: pd.Series, equity: pd.Series, turnover: pd
     periods = max(len(clean), 1)
     annualized_return = float((equity.iloc[-1] ** (252.0 / periods)) - 1.0) if equity.iloc[-1] > 0 else -1.0
     annualized_vol = float(clean.std(ddof=0) * math.sqrt(252.0))
-    sharpe = float((clean.mean() * 252.0) / annualized_vol) if annualized_vol > 1e-12 else 0.0
+    risk_free_daily = float((1.0 + risk_free_rate_annual) ** (1.0 / 252.0) - 1.0)
+    excess_daily = clean - risk_free_daily
+    excess_annualized_return = float(excess_daily.mean() * 252.0)
+    sharpe = float((excess_daily.mean() * 252.0) / annualized_vol) if annualized_vol > 1e-12 else 0.0
     return {
         "total_return": total_return,
         "annualized_return": annualized_return,
+        "excess_annualized_return": excess_annualized_return,
         "annualized_vol": annualized_vol,
         "sharpe": sharpe,
         "max_drawdown": _max_drawdown(equity),
@@ -86,6 +96,7 @@ def run_tactical_score_backtest(
     rebalance_every: int = 5,
     top_n: int = 8,
     min_history: int = 180,
+    risk_free_rate_annual: float = 0.02,
 ) -> dict[str, Path]:
     params = build_params()
     tickers = list(params["tickers"])
@@ -190,7 +201,7 @@ def run_tactical_score_backtest(
             turnover = pd.Series(dtype=float)
         else:
             turnover = trades.loc[trades["strategy"].eq(strategy), "turnover"].astype(float)
-        stats = _performance_stats(ret, eq, turnover)
+        stats = _performance_stats(ret, eq, turnover, risk_free_rate_annual=risk_free_rate_annual)
         summary_rows.append({"strategy": strategy, **stats})
 
     summary = pd.DataFrame(summary_rows).sort_values("sharpe", ascending=False)
@@ -213,6 +224,7 @@ def run_tactical_score_backtest(
         f"end_date: {str(pd.Timestamp(bt_dates[-1]).date()) if bt_dates else 'n/a'}",
         f"rebalance_every: {rebalance_every}",
         f"top_n: {top_n}",
+        f"risk_free_rate_annual: {risk_free_rate_annual:.4f}",
         "",
         "method:",
         "- Rebalances every N trading days using only data available up to that date.",
@@ -227,8 +239,8 @@ def run_tactical_score_backtest(
     for row in summary.itertuples(index=False):
         lines.append(
             f"- {row.strategy}: total_return={row.total_return:.4f}, "
-            f"ann_return={row.annualized_return:.4f}, ann_vol={row.annualized_vol:.4f}, "
-            f"sharpe={row.sharpe:.3f}, max_dd={row.max_drawdown:.4f}, "
+            f"ann_return={row.annualized_return:.4f}, excess_ann_return={row.excess_annualized_return:.4f}, "
+            f"ann_vol={row.annualized_vol:.4f}, sharpe={row.sharpe:.3f}, max_dd={row.max_drawdown:.4f}, "
             f"total_turnover={row.total_turnover:.2f}"
         )
 
