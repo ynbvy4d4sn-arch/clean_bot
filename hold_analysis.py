@@ -117,12 +117,17 @@ def _pick_row(frame: pd.DataFrame, column: str, value: str) -> pd.Series | None:
 def _pick_best_valid_non_hold(discrete_scores: pd.DataFrame) -> pd.Series | None:
     if discrete_scores.empty:
         return None
-    valid = discrete_scores[discrete_scores.get("valid_constraints", False) == True].copy()  # noqa: E712
+
+    valid = discrete_scores.copy()
+    if "valid_constraints" in valid.columns:
+        valid = valid[valid["valid_constraints"].fillna(False).astype(bool)].copy()
+
     if valid.empty or "discrete_candidate" not in valid.columns:
         return None
     valid = valid[valid["discrete_candidate"].astype(str) != "HOLD_CURRENT"]
     if valid.empty:
         return None
+
     sort_columns = [
         "net_robust_score",
         "cvar_5",
@@ -132,6 +137,9 @@ def _pick_best_valid_non_hold(discrete_scores: pd.DataFrame) -> pd.Series | None
         "cash_left",
     ]
     existing_columns = [column for column in sort_columns if column in valid.columns]
+    if not existing_columns:
+        return valid.iloc[0]
+
     ascending = [False, False, True, True, True, True][: len(existing_columns)]
     valid = valid.sort_values(existing_columns, ascending=ascending, kind="mergesort")
     return valid.iloc[0]
@@ -140,9 +148,13 @@ def _pick_best_valid_non_hold(discrete_scores: pd.DataFrame) -> pd.Series | None
 def _pick_best_invalid_from_source(discrete_scores: pd.DataFrame, continuous_candidate: str) -> pd.Series | None:
     if discrete_scores.empty or "continuous_source" not in discrete_scores.columns:
         return None
+    invalid_mask = pd.Series(True, index=discrete_scores.index)
+    if "valid_constraints" in discrete_scores.columns:
+        invalid_mask = ~discrete_scores["valid_constraints"].fillna(False).astype(bool)
+
     rows = discrete_scores[
         (discrete_scores["continuous_source"].astype(str) == str(continuous_candidate))
-        & (discrete_scores.get("valid_constraints", True) != True)  # noqa: E712
+        & invalid_mask
     ].copy()
     if rows.empty:
         return None
