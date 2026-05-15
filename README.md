@@ -1,3 +1,56 @@
+# clean_bot
+
+## Current validated workflow
+
+This repository contains the cleaned working copy of the robust 3M active allocation bot.
+
+Current active daily path:
+
+- final allocation source: `SCENARIO_WEIGHTED_RF_SHARPE_OPTIMAL`
+- execution mode by default: dry-run preview only
+- active scenario probabilities: dynamic regime-based probabilities in `scenario_daily_pipeline.py`
+- active probability report: `outputs/active_scenario_probabilities.csv`
+- scenario risk diagnostics report: `outputs/scenario_risk_probability_report.csv`
+- no real broker execution by default
+
+## Setup
+
+Run from the project root:
+
+    cd ~/uni_trading_bot_project/clean_bot
+    python -m pip install -r requirements.txt
+    cp .env.example .env
+
+Fill `.env` only with local credentials/settings. Never commit `.env`.
+
+## Validation
+
+Run the full local validation gate:
+
+    ./scripts/validate_project.sh
+
+Equivalent manual commands:
+
+    python -m pytest tests_new -q
+    python -m compileall -q .
+    python smoke_test.py
+    python daily_bot.py --dry-run --skip-submit
+
+After dry-runs, runtime market-cache changes can be discarded with:
+
+    git checkout -- data/prices_cache.csv data/prices_cache.csv.meta.json
+
+## GitHub
+
+Current remote workflow:
+
+    git status --short
+    git add -A
+    git commit -m "Describe change"
+    git push
+
+---
+
 # robust_3m_active_allocation_optimizer
 
 ## Kurzbeschreibung
