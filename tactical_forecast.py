@@ -758,3 +758,254 @@ def write_tactical_forecast_calibration_outputs(
         "tactical_forecast_calibration": str(calibration_path),
         "tactical_forecast_calibration_report": str(report_path),
     }
+
+
+def build_tactical_component_calibration(
+    *,
+    prices: pd.DataFrame,
+    params: dict[str, object] | None = None,
+    tickers: Sequence[str] | None = None,
+    as_of: pd.Timestamp | str | None = None,
+    horizons: Sequence[int] = (3, 5, 10),
+    min_history: int = 180,
+    max_samples: int = 180,
+    step: int = 5,
+) -> tuple[pd.DataFrame, str]:
+    """Walk-forward calibration for individual tactical signal components.
+
+    Report-only diagnostic. This identifies which components have historical
+    rank/return signal before changing tactical_score weights.
+    """
+
+    if prices.empty:
+        raise ValueError("prices must not be empty.")
+
+    params = dict(params or {})
+    end_date = pd.Timestamp(as_of if as_of is not None else prices.index[-1])
+    active_tickers = [str(ticker) for ticker in (tickers or prices.columns.tolist()) if str(ticker) in prices.columns]
+    history = prices.reindex(columns=active_tickers).loc[:end_date].sort_index().ffill(limit=3).dropna(how="all")
+
+    component_columns = [
+        "tactical_score",
+        "momentum_3d",
+        "momentum_5d",
+        "momentum_10d",
+        "momentum_20d",
+        "momentum_60d",
+        "vol_adjusted_momentum_20d",
+        "mean_reversion_score",
+        "overextension_score",
+        "trend_score",
+        "drawdown_60d",
+        "relative_strength_rank",
+        "expected_return_3d",
+        "expected_return_5d",
+        "expected_return_10d",
+        "expected_return_to_project_end",
+        "forecast_confidence",
+        "risk_adjusted_forecast",
+        "vol_5d",
+        "vol_20d",
+    ]
+
+    max_horizon = max(int(h) for h in horizons)
+    if len(history) < min_history + max_horizon + 2:
+        empty = pd.DataFrame(
+            columns=[
+                "component",
+                "horizon_days",
+                "sample_count",
+                "rank_ic_mean",
+                "rank_ic_median",
+                "top_minus_bottom_mean",
+                "top_hit_rate_mean",
+            ]
+        )
+        report = (
+            "Tactical Component Calibration Report\n\n"
+            f"status: insufficient_history\n"
+            f"available_rows: {len(history)}\n"
+            f"required_rows: {min_history + max_horizon + 2}\n"
+        )
+        return empty, report
+
+    returns = compute_returns(history)
+    eligible_positions = list(range(min_history, len(history) - max_horizon, max(step, 1)))
+    if len(eligible_positions) > max_samples:
+        eligible_positions = eligible_positions[-max_samples:]
+
+    rows: list[dict[str, object]] = []
+
+    for pos in eligible_positions:
+        decision_date = pd.Timestamp(history.index[pos])
+        try:
+            tactical = build_multi_horizon_forecast(
+                prices=history.iloc[: pos + 1],
+                returns=returns.loc[:decision_date],
+                date=decision_date,
+                params=params,
+                tickers=active_tickers,
+            )
+        except Exception:
+            continue
+
+        table = tactical.table.set_index("ticker")
+
+        for horizon in horizons:
+            h = int(horizon)
+            fwd = _forward_return(history, pos, h)
+            if fwd.empty:
+                continue
+
+            for component in component_columns:
+                if component not in table.columns:
+                    continue
+
+                signal = table[component].astype(float)
+
+                # For rank columns and risk-only columns, higher raw value is not always "better".
+                # Calibration remains descriptive: if IC/top-minus-bottom is negative, the component
+                # is either harmful as-is or should be inverted/used as a penalty.
+                frame = pd.DataFrame(
+                    {
+                        "signal": signal,
+                        "forward_return": fwd.reindex(signal.index),
+                    }
+                ).replace([np.inf, -np.inf], np.nan).dropna()
+
+                if len(frame) < 10:
+                    continue
+
+                rank_ic = _spearman_rank_ic(frame["signal"], frame["forward_return"])
+                quintile_size = max(int(np.ceil(len(frame) * 0.20)), 1)
+                top = frame.sort_values("signal", ascending=False).head(quintile_size)
+                bottom = frame.sort_values("signal", ascending=True).head(quintile_size)
+
+                top_mean = float(top["forward_return"].mean())
+                bottom_mean = float(bottom["forward_return"].mean())
+
+                rows.append(
+                    {
+                        "decision_date": str(decision_date.date()),
+                        "component": component,
+                        "horizon_days": h,
+                        "asset_count": int(len(frame)),
+                        "rank_ic": rank_ic,
+                        "top_quintile_forward_return": top_mean,
+                        "bottom_quintile_forward_return": bottom_mean,
+                        "top_minus_bottom": top_mean - bottom_mean,
+                        "top_hit_rate": float((top["forward_return"] > 0.0).mean()),
+                        "bottom_hit_rate": float((bottom["forward_return"] > 0.0).mean()),
+                    }
+                )
+
+    raw = pd.DataFrame(rows)
+    if raw.empty:
+        report = (
+            "Tactical Component Calibration Report\n\n"
+            "status: no_valid_walk_forward_samples\n"
+        )
+        return raw, report
+
+    summary_rows: list[dict[str, object]] = []
+    for (component, horizon), group in raw.groupby(["component", "horizon_days"]):
+        rank_ic_mean = float(group["rank_ic"].mean())
+        top_minus_bottom_mean = float(group["top_minus_bottom"].mean())
+        summary_rows.append(
+            {
+                "component": str(component),
+                "horizon_days": int(horizon),
+                "sample_count": int(len(group)),
+                "rank_ic_mean": rank_ic_mean,
+                "rank_ic_median": float(group["rank_ic"].median()),
+                "top_quintile_forward_return_mean": float(group["top_quintile_forward_return"].mean()),
+                "bottom_quintile_forward_return_mean": float(group["bottom_quintile_forward_return"].mean()),
+                "top_minus_bottom_mean": top_minus_bottom_mean,
+                "top_hit_rate_mean": float(group["top_hit_rate"].mean()),
+                "bottom_hit_rate_mean": float(group["bottom_hit_rate"].mean()),
+                "signal_direction_suggestion": (
+                    "use_positive"
+                    if rank_ic_mean > 0.01 and top_minus_bottom_mean > 0.0
+                    else (
+                        "consider_inverse_or_penalty"
+                        if rank_ic_mean < -0.01 and top_minus_bottom_mean < 0.0
+                        else "weak_or_mixed"
+                    )
+                ),
+            }
+        )
+
+    summary = pd.DataFrame(summary_rows).sort_values(
+        ["horizon_days", "top_minus_bottom_mean", "rank_ic_mean"],
+        ascending=[True, False, False],
+    ).reset_index(drop=True)
+
+    lines = [
+        "Tactical Component Calibration Report",
+        "",
+        "status: report_only_no_order_change",
+        f"as_of: {end_date.date()}",
+        f"asset_count: {len(active_tickers)}",
+        f"walk_forward_samples: {len(raw)}",
+        f"sample_step_days: {step}",
+        "",
+        "method:",
+        "- Recomputes tactical components on historical decision dates using only data available up to each date.",
+        "- Measures each component against realized 3d/5d/10d forward returns.",
+        "- Positive rank_ic/top_minus_bottom means high component values historically ranked better assets.",
+        "- Negative rank_ic/top_minus_bottom means the component may be harmful as a positive signal or useful as a penalty.",
+        "- This report is diagnostic only and does not alter final orders.",
+        "",
+    ]
+
+    for horizon in sorted(summary["horizon_days"].unique()):
+        subset = summary[summary["horizon_days"] == horizon].copy()
+        lines.append(f"top_components_{int(horizon)}d:")
+        for row in subset.head(8).itertuples(index=False):
+            lines.append(
+                f"- {row.component}: rank_ic={row.rank_ic_mean:.4f}, "
+                f"top_minus_bottom={row.top_minus_bottom_mean:.4f}, "
+                f"hit_rate={row.top_hit_rate_mean:.3f}, suggestion={row.signal_direction_suggestion}"
+            )
+        lines.append("")
+        lines.append(f"weakest_components_{int(horizon)}d:")
+        for row in subset.tail(8).sort_values("top_minus_bottom_mean", ascending=True).itertuples(index=False):
+            lines.append(
+                f"- {row.component}: rank_ic={row.rank_ic_mean:.4f}, "
+                f"top_minus_bottom={row.top_minus_bottom_mean:.4f}, "
+                f"hit_rate={row.top_hit_rate_mean:.3f}, suggestion={row.signal_direction_suggestion}"
+            )
+        lines.append("")
+
+    return summary, "\n".join(lines).rstrip() + "\n"
+
+
+def write_tactical_component_calibration_outputs(
+    *,
+    prices: pd.DataFrame,
+    params: dict[str, object] | None,
+    tickers: Sequence[str],
+    as_of: pd.Timestamp | str,
+    output_dir: str | Path,
+) -> dict[str, str]:
+    """Write component-level tactical signal calibration outputs."""
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    calibration_path = output_path / "tactical_component_calibration.csv"
+    report_path = output_path / "tactical_component_calibration_report.txt"
+
+    calibration, report = build_tactical_component_calibration(
+        prices=prices,
+        params=params,
+        tickers=tickers,
+        as_of=as_of,
+    )
+    calibration.to_csv(calibration_path, index=False)
+    report_path.write_text(report, encoding="utf-8")
+
+    return {
+        "tactical_component_calibration": str(calibration_path),
+        "tactical_component_calibration_report": str(report_path),
+    }

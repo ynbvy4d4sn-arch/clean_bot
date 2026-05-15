@@ -77,6 +77,7 @@ from tactical_forecast import (
     write_tactical_forecast_outputs,
     write_tactical_order_alignment,
     write_tactical_forecast_calibration_outputs,
+    write_tactical_component_calibration_outputs,
 )
 from macro_data import DEFAULT_PROXY_TICKERS, load_macro_proxy_data
 from model_governance import compute_model_confidence, save_model_governance_report
@@ -3847,9 +3848,17 @@ def _run_single_impl(args: argparse.Namespace, diagnostics) -> dict[str, object]
             as_of=as_of,
             output_dir=OUTPUT_DIR,
         )
+        tactical_component_calibration_paths = write_tactical_component_calibration_outputs(
+            prices=prices,
+            params=params,
+            tickers=active_tickers,
+            as_of=as_of,
+            output_dir=OUTPUT_DIR,
+        )
         tactical_output_paths = {
             **tactical_output_paths,
             **tactical_calibration_paths,
+            **tactical_component_calibration_paths,
         }
         diagnostics.model_context["tactical_forecast_summary"] = {
             "asset_count": int(len(tactical_forecast.table)),
