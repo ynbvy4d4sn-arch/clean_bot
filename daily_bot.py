@@ -3659,6 +3659,8 @@ def _run_single_impl(args: argparse.Namespace, diagnostics) -> dict[str, object]
         covariance_3m=sigma,
         risk_state=risk_state,
         as_of=as_of,
+        prices=prices,
+        market_ticker="SPY",
     )
     log_stage(diagnostics, "scenario model", "DONE", extra={"scenario_count": len(direct_scenarios.scenario_names)})
 
