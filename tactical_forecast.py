@@ -1009,3 +1009,268 @@ def write_tactical_component_calibration_outputs(
         "tactical_component_calibration": str(calibration_path),
         "tactical_component_calibration_report": str(report_path),
     }
+
+
+def _build_tactical_score_v2_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Add a calibrated-report candidate score based on component diagnostics.
+
+    This is intentionally conservative and report-only. It is not used for
+    final allocation or execution.
+    """
+
+    out = table.copy()
+
+    # Rank 1 means strongest relative strength, so convert to a higher-is-better score.
+    if "relative_strength_rank" in out.columns:
+        max_rank = float(out["relative_strength_rank"].max() or 1.0)
+        out["relative_strength_score"] = 1.0 - ((out["relative_strength_rank"].astype(float) - 1.0) / max(max_rank - 1.0, 1.0))
+    else:
+        out["relative_strength_score"] = 0.0
+
+    # A4 found raw vol components had the strongest positive historical top-minus-bottom.
+    # Keep this as a participation/risk-on candidate, not as a final objective.
+    vol_participation = 0.55 * _zscore(out.get("vol_5d", pd.Series(0.0, index=out.index))) + 0.45 * _zscore(
+        out.get("vol_20d", pd.Series(0.0, index=out.index))
+    )
+
+    # Avoid blindly chasing the existing v1 score and overconfident forecast proxies,
+    # which calibrated negatively in A3/A4.
+    anti_overconfidence = -0.35 * _zscore(out.get("forecast_confidence", pd.Series(0.0, index=out.index))) - 0.30 * _zscore(
+        out.get("risk_adjusted_forecast", pd.Series(0.0, index=out.index))
+    )
+
+    # Momentum was weak/mixed; include only a small relative-strength component.
+    relative_strength_component = 0.25 * _zscore(out["relative_strength_score"])
+
+    # Mild reversal: A4 suggested trend/momentum was often not reliable as a positive signal.
+    reversal_component = -0.20 * _zscore(out.get("trend_score", pd.Series(0.0, index=out.index))) - 0.15 * _zscore(
+        out.get("momentum_20d", pd.Series(0.0, index=out.index))
+    )
+
+    # Penalize very severe drawdowns less aggressively than v1; drawdown_60d is negative.
+    # This term rewards less damaged charts mildly, but does not dominate.
+    drawdown_quality = 0.10 * _zscore(out.get("drawdown_60d", pd.Series(0.0, index=out.index)))
+
+    out["tactical_score_v2_candidate"] = (
+        vol_participation
+        + anti_overconfidence
+        + relative_strength_component
+        + reversal_component
+        + drawdown_quality
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    out["tactical_rank_v2_candidate"] = out["tactical_score_v2_candidate"].rank(ascending=False, method="dense").astype(int)
+    return out
+
+
+def build_tactical_score_v2_comparison(
+    *,
+    prices: pd.DataFrame,
+    params: dict[str, object] | None = None,
+    tickers: Sequence[str] | None = None,
+    as_of: pd.Timestamp | str | None = None,
+    horizons: Sequence[int] = (3, 5, 10),
+    min_history: int = 180,
+    max_samples: int = 180,
+    step: int = 5,
+) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Compare v1 tactical_score against report-only v2 candidate."""
+
+    if prices.empty:
+        raise ValueError("prices must not be empty.")
+
+    params = dict(params or {})
+    end_date = pd.Timestamp(as_of if as_of is not None else prices.index[-1])
+    active_tickers = [str(ticker) for ticker in (tickers or prices.columns.tolist()) if str(ticker) in prices.columns]
+    history = prices.reindex(columns=active_tickers).loc[:end_date].sort_index().ffill(limit=3).dropna(how="all")
+
+    max_horizon = max(int(h) for h in horizons)
+    returns = compute_returns(history)
+
+    # Current v2 table
+    current_result = build_multi_horizon_forecast(
+        prices=history,
+        returns=returns,
+        date=end_date,
+        params=params,
+        tickers=active_tickers,
+    )
+    current_table = _build_tactical_score_v2_table(current_result.table)
+
+    if len(history) < min_history + max_horizon + 2:
+        comparison = pd.DataFrame()
+        report = (
+            "Tactical Score v2 Candidate Report\n\n"
+            "status: insufficient_history\n"
+            f"available_rows: {len(history)}\n"
+            f"required_rows: {min_history + max_horizon + 2}\n"
+        )
+        return current_table, comparison, report
+
+    eligible_positions = list(range(min_history, len(history) - max_horizon, max(step, 1)))
+    if len(eligible_positions) > max_samples:
+        eligible_positions = eligible_positions[-max_samples:]
+
+    rows: list[dict[str, object]] = []
+    for pos in eligible_positions:
+        decision_date = pd.Timestamp(history.index[pos])
+        try:
+            tactical = build_multi_horizon_forecast(
+                prices=history.iloc[: pos + 1],
+                returns=returns.loc[:decision_date],
+                date=decision_date,
+                params=params,
+                tickers=active_tickers,
+            )
+            table = _build_tactical_score_v2_table(tactical.table).set_index("ticker")
+        except Exception:
+            continue
+
+        for horizon in horizons:
+            h = int(horizon)
+            fwd = _forward_return(history, pos, h)
+            if fwd.empty:
+                continue
+
+            frame = pd.DataFrame(
+                {
+                    "v1": table["tactical_score"].astype(float),
+                    "v2": table["tactical_score_v2_candidate"].astype(float),
+                    "forward_return": fwd.reindex(table.index),
+                }
+            ).replace([np.inf, -np.inf], np.nan).dropna()
+
+            if len(frame) < 10:
+                continue
+
+            quintile_size = max(int(np.ceil(len(frame) * 0.20)), 1)
+
+            for score_name in ["v1", "v2"]:
+                top = frame.sort_values(score_name, ascending=False).head(quintile_size)
+                bottom = frame.sort_values(score_name, ascending=True).head(quintile_size)
+                top_mean = float(top["forward_return"].mean())
+                bottom_mean = float(bottom["forward_return"].mean())
+                rows.append(
+                    {
+                        "decision_date": str(decision_date.date()),
+                        "score_name": score_name,
+                        "horizon_days": h,
+                        "rank_ic": _spearman_rank_ic(frame[score_name], frame["forward_return"]),
+                        "top_quintile_forward_return": top_mean,
+                        "bottom_quintile_forward_return": bottom_mean,
+                        "top_minus_bottom": top_mean - bottom_mean,
+                        "top_hit_rate": float((top["forward_return"] > 0.0).mean()),
+                    }
+                )
+
+    raw = pd.DataFrame(rows)
+    if raw.empty:
+        report = "Tactical Score v2 Candidate Report\n\nstatus: no_valid_walk_forward_samples\n"
+        return current_table, raw, report
+
+    summary_rows: list[dict[str, object]] = []
+    for (score_name, horizon), group in raw.groupby(["score_name", "horizon_days"]):
+        summary_rows.append(
+            {
+                "score_name": str(score_name),
+                "horizon_days": int(horizon),
+                "sample_count": int(len(group)),
+                "rank_ic_mean": float(group["rank_ic"].mean()),
+                "rank_ic_median": float(group["rank_ic"].median()),
+                "top_quintile_forward_return_mean": float(group["top_quintile_forward_return"].mean()),
+                "bottom_quintile_forward_return_mean": float(group["bottom_quintile_forward_return"].mean()),
+                "top_minus_bottom_mean": float(group["top_minus_bottom"].mean()),
+                "top_hit_rate_mean": float(group["top_hit_rate"].mean()),
+            }
+        )
+
+    comparison = pd.DataFrame(summary_rows).sort_values(["horizon_days", "score_name"]).reset_index(drop=True)
+
+    lines = [
+        "Tactical Score v2 Candidate Report",
+        "",
+        "status: report_only_no_order_change",
+        f"as_of: {end_date.date()}",
+        f"asset_count: {len(active_tickers)}",
+        f"walk_forward_rows: {len(raw)}",
+        "",
+        "method:",
+        "- Builds tactical_score_v2_candidate from component calibration findings.",
+        "- Compares v1 tactical_score and v2 candidate against realized 3d/5d/10d forward returns.",
+        "- v2 is a candidate diagnostic only; it does not alter final orders.",
+        "- Positive top_minus_bottom and rank_ic are better.",
+        "",
+        "score_comparison:",
+    ]
+
+    for row in comparison.itertuples(index=False):
+        lines.append(
+            f"- {row.score_name} {row.horizon_days}d: "
+            f"rank_ic_mean={row.rank_ic_mean:.4f}, "
+            f"top_minus_bottom={row.top_minus_bottom_mean:.4f}, "
+            f"top_hit_rate={row.top_hit_rate_mean:.3f}"
+        )
+
+    lines.extend(["", "current_top_v2_assets:"])
+    for row in current_table.sort_values("tactical_score_v2_candidate", ascending=False).head(10).itertuples(index=False):
+        lines.append(
+            f"- {row.ticker}: v2_rank={row.tactical_rank_v2_candidate}, "
+            f"v2_score={row.tactical_score_v2_candidate:.4f}, "
+            f"v1_rank={row.tactical_rank}, v1_score={row.tactical_score:.4f}"
+        )
+
+    return current_table, comparison, "\n".join(lines) + "\n"
+
+
+def write_tactical_score_v2_outputs(
+    *,
+    prices: pd.DataFrame,
+    params: dict[str, object] | None,
+    tickers: Sequence[str],
+    as_of: pd.Timestamp | str,
+    output_dir: str | Path,
+) -> dict[str, str]:
+    """Write report-only tactical score v2 candidate outputs."""
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    comparison_path = output_path / "tactical_score_v2_comparison.csv"
+    current_path = output_path / "tactical_score_v2_current.csv"
+    report_path = output_path / "tactical_score_v2_report.txt"
+
+    current_table, comparison, report = build_tactical_score_v2_comparison(
+        prices=prices,
+        params=params,
+        tickers=tickers,
+        as_of=as_of,
+    )
+
+    keep_cols = [
+        "ticker",
+        "tactical_rank",
+        "tactical_score",
+        "tactical_rank_v2_candidate",
+        "tactical_score_v2_candidate",
+        "relative_strength_score",
+        "vol_5d",
+        "vol_20d",
+        "forecast_confidence",
+        "risk_adjusted_forecast",
+        "trend_score",
+        "momentum_20d",
+        "drawdown_60d",
+        "reason",
+    ]
+    current_table.loc[:, [c for c in keep_cols if c in current_table.columns]].sort_values(
+        "tactical_score_v2_candidate",
+        ascending=False,
+    ).to_csv(current_path, index=False)
+    comparison.to_csv(comparison_path, index=False)
+    report_path.write_text(report, encoding="utf-8")
+
+    return {
+        "tactical_score_v2_current": str(current_path),
+        "tactical_score_v2_comparison": str(comparison_path),
+        "tactical_score_v2_report": str(report_path),
+    }
