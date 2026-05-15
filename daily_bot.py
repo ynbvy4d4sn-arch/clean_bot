@@ -72,6 +72,7 @@ from factor_data import build_factor_data
 from factor_forecast import build_factor_forecast
 from feasibility import check_portfolio_feasibility
 from forecast_3m import build_forecast_3m
+from tactical_forecast import build_multi_horizon_forecast, write_tactical_forecast_outputs
 from macro_data import DEFAULT_PROXY_TICKERS, load_macro_proxy_data
 from model_governance import compute_model_confidence, save_model_governance_report
 from order_sizing import convert_weights_to_orders
@@ -3804,6 +3805,34 @@ def _run_single_impl(args: argparse.Namespace, diagnostics) -> dict[str, object]
         "asset_count": int(len(forecast.table)),
         "signal_confidence_mean": float(forecast.table["signal_confidence"].mean()),
     }
+    try:
+        tactical_forecast = build_multi_horizon_forecast(
+            prices=prices,
+            returns=returns,
+            date=as_of,
+            params=params,
+            tickers=active_tickers,
+        )
+        tactical_output_paths = write_tactical_forecast_outputs(
+            tactical_forecast,
+            output_dir=OUTPUT_DIR,
+        )
+        diagnostics.model_context["tactical_forecast_summary"] = {
+            "asset_count": int(len(tactical_forecast.table)),
+            "remaining_trading_days": int(tactical_forecast.remaining_trading_days),
+            "top_tactical_asset": str(tactical_forecast.table.iloc[0]["ticker"]) if not tactical_forecast.table.empty else "n/a",
+            "top_tactical_score": float(tactical_forecast.table.iloc[0]["tactical_score"]) if not tactical_forecast.table.empty else 0.0,
+            "report_files": tactical_output_paths,
+            "decision_impact": "report_only_no_order_change",
+        }
+    except Exception as exc:
+        log_warning(
+            diagnostics,
+            "daily_bot",
+            f"tactical forecast report failed: {exc}",
+            severity="WARNING",
+            stage="forecast",
+        )
     log_stage(diagnostics, "forecast", "DONE", extra=diagnostics.model_context["forecast_summary"])
     log_stage(diagnostics, "covariance/risk", "START")
     sigma = estimate_robust_covariance_at_date(
