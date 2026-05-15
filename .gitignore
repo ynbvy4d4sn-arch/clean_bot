@@ -38,3 +38,8 @@ notebooks/
 .env
 .env.*
 secrets.*
+
+# Python runtime/test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
