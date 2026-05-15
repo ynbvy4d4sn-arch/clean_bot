@@ -37,6 +37,7 @@ notebooks/
 # Secrets
 .env
 .env.*
+!.env.example
 secrets.*
 
 # Python runtime/test artifacts
