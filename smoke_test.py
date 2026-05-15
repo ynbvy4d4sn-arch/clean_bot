@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import logging
 import sys
+import warnings
 from contextlib import contextmanager
 
 import pandas as pd
@@ -20,22 +21,38 @@ from order_preview import generate_order_preview
 
 
 @contextmanager
-def _suppress_expected_notification_failure_logs():
-    """Suppress expected notification failure logs emitted by health-check test probes."""
+def _suppress_expected_health_check_probe_logs():
+    """Suppress expected noisy logs emitted by health-check test probes."""
 
-    logger = logging.getLogger("notifications")
+    filters: list[tuple[logging.Logger, logging.Filter]] = []
 
-    class ExpectedNotificationFailureFilter(logging.Filter):
+    class ExpectedHealthCheckProbeFilter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
             message = str(record.getMessage())
-            return not message.startswith("Email send failed but the run will continue:")
+            noisy_prefixes = (
+                "Email send failed but the run will continue:",
+                "Price download failed. Continuing with cache fallback.",
+            )
+            return not message.startswith(noisy_prefixes)
 
-    filter_obj = ExpectedNotificationFailureFilter()
-    logger.addFilter(filter_obj)
+    for logger_name in ["notifications", "data"]:
+        logger = logging.getLogger(logger_name)
+        filter_obj = ExpectedHealthCheckProbeFilter()
+        logger.addFilter(filter_obj)
+        filters.append((logger, filter_obj))
+
     try:
-        yield
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="invalid value encountered in divide",
+                category=RuntimeWarning,
+                module="matplotlib\\.axes\\._axes",
+            )
+            yield
     finally:
-        logger.removeFilter(filter_obj)
+        for logger, filter_obj in filters:
+            logger.removeFilter(filter_obj)
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -75,7 +92,7 @@ def run_smoke_test() -> list[str]:
     _assert(feasibility["feasible"], "Feasibility check failed on dummy setup.")
     messages.append("Feasibility check: OK")
 
-    with _suppress_expected_notification_failure_logs():
+    with _suppress_expected_health_check_probe_logs():
         health_df = run_health_check(quick=True, full=False)
     _assert(not health_df.empty, "Health check quick returned no rows.")
     _assert(
