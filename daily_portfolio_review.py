@@ -153,9 +153,18 @@ def load_daily_review_settings() -> dict[str, Any]:
         "enable_local_paper_trading": _parse_bool(os.getenv("ENABLE_LOCAL_PAPER_TRADING"), default=False),
         "dry_run": _parse_bool(os.getenv("DRY_RUN"), default=True),
         "email_provider": str(email_settings.get("EMAIL_PROVIDER", "brevo")),
+        "EMAIL_PROVIDER": str(email_settings.get("EMAIL_PROVIDER", "brevo")),
+        "email_sender": str(email_settings.get("EMAIL_SENDER", "") or email_settings.get("EMAIL_FROM", "")).strip(),
+        "EMAIL_SENDER": str(email_settings.get("EMAIL_SENDER", "") or email_settings.get("EMAIL_FROM", "")).strip(),
+        "EMAIL_FROM": str(email_settings.get("EMAIL_FROM", "") or email_settings.get("EMAIL_SENDER", "")).strip(),
+        "brevo_api_key": str(email_settings.get("BREVO_API_KEY", "") or email_settings.get("EMAIL_API_KEY", "")).strip(),
+        "BREVO_API_KEY": str(email_settings.get("BREVO_API_KEY", "") or email_settings.get("EMAIL_API_KEY", "")).strip(),
+        "EMAIL_API_KEY": str(email_settings.get("EMAIL_API_KEY", "") or email_settings.get("BREVO_API_KEY", "")).strip(),
+        "EMAIL_RECIPIENT": str(email_settings.get("EMAIL_RECIPIENT", "") or email_settings.get("EMAIL_TO", "")).strip(),
+        "EMAIL_TO": str(email_settings.get("EMAIL_TO", "") or email_settings.get("EMAIL_RECIPIENT", "")).strip(),
         "smtp_host": str(email_settings.get("SMTP_HOST", "")),
         "smtp_port": _parse_int(email_settings.get("SMTP_PORT"), default=587),
-        "email_sender_present": bool(str(email_settings.get("EMAIL_FROM", "")).strip()),
+        "email_sender_present": bool(str(email_settings.get("EMAIL_SENDER", "") or email_settings.get("EMAIL_FROM", "")).strip()),
     }
 
 
