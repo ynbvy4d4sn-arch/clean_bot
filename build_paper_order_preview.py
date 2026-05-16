@@ -30,6 +30,7 @@ DEFAULT_NAV_USD = 100_000.0
 MIN_ORDER_USD = 100.0
 MAX_ORDER_USD = 25_000.0
 ROUND_TO_WHOLE_SHARES = True
+MIN_CASH_BUFFER_USD = 500.0
 
 CURRENT_WEIGHTS: dict[str, float] = {}
 
@@ -287,10 +288,62 @@ def main() -> None:
     actionable = out[out["action"].isin(["BUY", "SELL"])].copy()
     rejected = out[out["action"].eq("REJECT")].copy()
 
-    buy_total = float(actionable[actionable["action"].eq("BUY")]["rounded_dollar_delta"].sum())
-    sell_total = float(actionable[actionable["action"].eq("SELL")]["rounded_dollar_delta"].sum())
-    net_cash_impact = buy_total + sell_total
-    preview_cash_after_orders = current_cash_usd - net_cash_impact
+    def recompute_cash(frame: pd.DataFrame) -> tuple[float, float, float, float]:
+        active = frame[frame["action"].isin(["BUY", "SELL"])].copy()
+        buy = float(active[active["action"].eq("BUY")]["rounded_dollar_delta"].sum())
+        sell = float(active[active["action"].eq("SELL")]["rounded_dollar_delta"].sum())
+        net = buy + sell
+        cash_after = current_cash_usd - net
+        return buy, sell, net, cash_after
+
+    cash_adjustments = []
+
+    buy_total, sell_total, net_cash_impact, preview_cash_after_orders = recompute_cash(out)
+
+    # Cash safety: reduce BUY orders one share at a time until cash buffer is respected.
+    # This is preview-only and avoids creating dry-run orders that would overspend available cash.
+    if preview_cash_after_orders < MIN_CASH_BUFFER_USD:
+        buy_idx = list(
+            out[out["action"].eq("BUY")]
+            .sort_values("rounded_dollar_delta", ascending=True)
+            .index
+        )
+
+        changed = True
+        while preview_cash_after_orders < MIN_CASH_BUFFER_USD and changed:
+            changed = False
+            for idx in buy_idx:
+                if preview_cash_after_orders >= MIN_CASH_BUFFER_USD:
+                    break
+
+                shares = float(out.at[idx, "estimated_shares"])
+                px = float(out.at[idx, "latest_price"])
+
+                if shares <= 1 or px <= 0:
+                    continue
+
+                out.at[idx, "estimated_shares"] = shares - 1
+                out.at[idx, "raw_estimated_shares"] = shares - 1
+                out.at[idx, "rounded_dollar_delta"] = (shares - 1) * px
+
+                cash_adjustments.append(
+                    {
+                        "ticker": out.at[idx, "ticker"],
+                        "removed_one_share_at_price": px,
+                    }
+                )
+
+                buy_total, sell_total, net_cash_impact, preview_cash_after_orders = recompute_cash(out)
+                changed = True
+
+        # Reject any BUY that was reduced to zero.
+        zero_buy_mask = (out["action"].eq("BUY")) & (out["estimated_shares"].abs() < 1)
+        out.loc[zero_buy_mask, "action"] = "REJECT"
+        out.loc[zero_buy_mask, "reject_reason"] = "cash_buffer_reduced_to_zero"
+
+    actionable = out[out["action"].isin(["BUY", "SELL"])].copy()
+    rejected = out[out["action"].eq("REJECT")].copy()
+    buy_total, sell_total, net_cash_impact, preview_cash_after_orders = recompute_cash(out)
 
     order_path = OUTPUT_DIR / "paper_order_preview.csv"
     report_path = OUTPUT_DIR / "paper_order_preview_report.txt"
@@ -308,6 +361,8 @@ def main() -> None:
         f"min_order_usd: {MIN_ORDER_USD:.2f}",
         f"max_order_usd: {MAX_ORDER_USD:.2f}",
         f"round_to_whole_shares: {ROUND_TO_WHOLE_SHARES}",
+        f"min_cash_buffer_usd: {MIN_CASH_BUFFER_USD:.2f}",
+        f"cash_adjustment_count: {len(cash_adjustments)}",
         f"rounded_buy_total: {buy_total:.2f}",
         f"rounded_sell_total: {sell_total:.2f}",
         f"net_cash_impact: {net_cash_impact:.2f}",
@@ -341,6 +396,16 @@ def main() -> None:
             f"shares={row.estimated_shares:.0f}, "
             f"rounded_dollar_delta={row.rounded_dollar_delta:+.2f}"
         )
+
+    lines.extend(["", "cash_safety_adjustments:"])
+    if not cash_adjustments:
+        lines.append("- none")
+    else:
+        by_ticker = {}
+        for item in cash_adjustments:
+            by_ticker[item["ticker"]] = by_ticker.get(item["ticker"], 0) + 1
+        for ticker, count in sorted(by_ticker.items()):
+            lines.append(f"- {ticker}: reduced_buy_shares={count}")
 
     lines.extend(["", "rejected_orders:"])
     if rejected.empty:

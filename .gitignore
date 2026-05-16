@@ -67,3 +67,6 @@ credentials.json
 
 # local browser sessions
 .local/
+
+# local/current paper portfolio state
+config/paper_positions.csv
