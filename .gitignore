@@ -70,3 +70,14 @@ credentials.json
 
 # local/current paper portfolio state
 config/paper_positions.csv
+
+# local Investopedia/browser/export data
+data/investopedia/
+outputs/investopedia_tud_navigator/
+render_tud_report_card.py.bak*
+
+.env
+.playwright/
+logs/
+data/investopedia/
+outputs/investopedia_tud_navigator/

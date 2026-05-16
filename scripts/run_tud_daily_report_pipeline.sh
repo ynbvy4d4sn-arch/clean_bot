@@ -13,21 +13,54 @@ echo "timestamp: $TS"
 echo "cwd: $(pwd)"
 echo ""
 
-echo "=== 1) Refresh Investopedia portfolio if parser/navigator exists ==="
+echo "=== 1) Auto-refresh Investopedia TUD portfolio ==="
 
-if [ -f "investopedia_tud_navigator.py" ]; then
-  echo "running investopedia_tud_navigator.py"
-  python investopedia_tud_navigator.py || echo "WARNING: navigator failed; continuing with latest available files"
+if [ -f "investopedia_auto_refresh.py" ]; then
+  echo "running investopedia_auto_refresh.py"
+  python investopedia_auto_refresh.py || {
+    echo "ERROR: automatic Investopedia refresh failed"
+    exit 1
+  }
 else
-  echo "skip: investopedia_tud_navigator.py not found"
+  echo "ERROR: investopedia_auto_refresh.py not found"
+  exit 1
 fi
 
 if [ -f "investopedia_tud_portfolio_parser.py" ]; then
   echo "running investopedia_tud_portfolio_parser.py"
-  python investopedia_tud_portfolio_parser.py || echo "WARNING: portfolio parser failed; continuing with latest available files"
+  python investopedia_tud_portfolio_parser.py || {
+    echo "ERROR: portfolio parser failed"
+    exit 1
+  }
 else
-  echo "skip: investopedia_tud_portfolio_parser.py not found"
+  echo "ERROR: investopedia_tud_portfolio_parser.py not found"
+  exit 1
 fi
+
+
+echo ""
+echo "=== 1b) Guard parsed Investopedia positions ==="
+
+if [ ! -f "config/paper_positions.csv" ]; then
+  echo "ERROR: config/paper_positions.csv missing after parser"
+  exit 1
+fi
+
+if ! head -1 config/paper_positions.csv | grep -q "ticker"; then
+  echo "ERROR: config/paper_positions.csv has wrong header"
+  head -5 config/paper_positions.csv
+  exit 1
+fi
+
+position_rows=$(tail -n +2 config/paper_positions.csv | wc -l | tr -d ' ')
+if [ "$position_rows" -lt 5 ]; then
+  echo "ERROR: too few parsed positions: $position_rows"
+  cat config/paper_positions.csv
+  exit 1
+fi
+
+echo "parsed position rows: $position_rows"
+head -12 config/paper_positions.csv
 
 echo ""
 echo "=== 2) Pull newest trade-history export if present ==="
@@ -52,6 +85,24 @@ fi
 echo ""
 echo "=== 3) Build paper order preview ==="
 python build_paper_order_preview.py
+
+
+echo ""
+echo "=== 3b) Guard order preview source ==="
+
+if grep -q "current_position_source: empty_all_cash" outputs/paper_order_preview_report.txt 2>/dev/null || \
+   grep -q "current_position_source: empty_all_cash" outputs/paper_order_preview.txt 2>/dev/null; then
+  echo "ERROR: order preview is using empty_all_cash. Refusing to continue."
+  exit 1
+fi
+
+if ! grep -q "current_position_source: positions_file:" outputs/paper_order_preview_report.txt 2>/dev/null && \
+   ! grep -q "current_position_source: positions_file:" outputs/paper_order_preview.txt 2>/dev/null; then
+  echo "ERROR: order preview did not confirm positions_file source."
+  exit 1
+fi
+
+echo "order preview uses parsed positions file."
 
 echo ""
 echo "=== 4) Validate order preview ==="

@@ -109,19 +109,73 @@ def read_meta() -> dict:
     return meta
 
 
-def load_positions() -> pd.DataFrame:
-    if not POSITIONS_CSV.exists():
-        return pd.DataFrame()
+def load_positions():
+    path = ROOT / "config" / "paper_positions.csv"
+    df = pd.read_csv(path)
 
-    df = pd.read_csv(POSITIONS_CSV)
+    cols = {c.lower().strip(): c for c in df.columns}
+
+    # Normalize ticker/symbol.
+    if "ticker" in cols:
+        df = df.rename(columns={cols["ticker"]: "ticker"})
+    elif "symbol" in cols:
+        df = df.rename(columns={cols["symbol"]: "ticker"})
+    else:
+        raise ValueError(f"positions file {path} must contain ticker or symbol column; got {list(df.columns)}")
+
+    # Normalize shares/quantity.
+    cols = {c.lower().strip(): c for c in df.columns}
+    if "shares" in cols:
+        df = df.rename(columns={cols["shares"]: "shares"})
+    elif "quantity" in cols:
+        df = df.rename(columns={cols["quantity"]: "shares"})
+    else:
+        raise ValueError(f"positions file {path} must contain shares or quantity column; got {list(df.columns)}")
+
+    # Normalize value columns.
+    cols = {c.lower().strip(): c for c in df.columns}
+
+    if "total_value" in cols:
+        df = df.rename(columns={cols["total_value"]: "total_value"})
+    elif "market_value" in cols:
+        df = df.rename(columns={cols["market_value"]: "total_value"})
+    elif "value" in cols:
+        df = df.rename(columns={cols["value"]: "total_value"})
+
+    if "current_price" in cols:
+        df = df.rename(columns={cols["current_price"]: "current_price"})
+    elif "price" in cols:
+        df = df.rename(columns={cols["price"]: "current_price"})
+
+    if "gain_loss" in cols:
+        df = df.rename(columns={cols["gain_loss"]: "gain_loss"})
+
     df["ticker"] = df["ticker"].astype(str).str.upper().str.strip()
-    df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0.0)
-    df["current_price"] = pd.to_numeric(df.get("current_price"), errors="coerce")
-    df["total_value"] = pd.to_numeric(df.get("total_value"), errors="coerce").fillna(0.0)
+    df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0)
 
-    total = float(df["total_value"].sum())
-    df["weight"] = np.where(total > 0, df["total_value"] / total, 0.0)
-    return df.sort_values("total_value", ascending=False).reset_index(drop=True)
+    if "current_price" in df.columns:
+        df["current_price"] = pd.to_numeric(df["current_price"], errors="coerce")
+    else:
+        df["current_price"] = pd.NA
+
+    if "total_value" in df.columns:
+        df["total_value"] = pd.to_numeric(df["total_value"], errors="coerce")
+    else:
+        # Fallback if only shares + current_price exist.
+        df["total_value"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0) * pd.to_numeric(df["current_price"], errors="coerce").fillna(0)
+
+    if "gain_loss" in df.columns:
+        df["gain_loss"] = pd.to_numeric(df["gain_loss"], errors="coerce")
+    else:
+        df["gain_loss"] = pd.NA
+
+    total = float(pd.to_numeric(df["total_value"], errors="coerce").fillna(0).sum())
+    if total > 0:
+        df["weight"] = pd.to_numeric(df["total_value"], errors="coerce").fillna(0) / total
+    else:
+        df["weight"] = 0.0
+
+    return df
 
 
 def load_orders() -> pd.DataFrame:
