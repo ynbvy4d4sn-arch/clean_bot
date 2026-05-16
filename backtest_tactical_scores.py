@@ -93,6 +93,65 @@ def _top_n_weights(score: pd.Series, n: int, max_weight: float = 0.25) -> pd.Ser
     return weights
 
 
+def _top_n_weights_with_controls(
+    *,
+    score: pd.Series,
+    previous_weights: pd.Series,
+    n: int,
+    max_weight: float = 0.25,
+    score_buffer: float = 0.0,
+    max_rebalance_turnover: float | None = None,
+) -> pd.Series:
+    """Top-N weights with optional score buffer and turnover cap.
+
+    score_buffer:
+        Keep an existing holding if its score is close enough to the new cutoff.
+        This reduces churn from tiny rank changes.
+
+    max_rebalance_turnover:
+        Cap one rebalance's one-way turnover, e.g. 0.20 means at most 20%.
+    """
+
+    clean = score.dropna().astype(float)
+    if clean.empty:
+        return pd.Series(dtype=float)
+
+    previous = previous_weights.reindex(clean.index).fillna(0.0)
+    ranked = clean.sort_values(ascending=False)
+    selected = set(ranked.head(n).index)
+
+    if score_buffer > 0.0 and len(ranked) >= n:
+        cutoff = float(ranked.iloc[n - 1])
+        current_holdings = set(previous[previous.abs() > 1e-12].index)
+        keepers = {
+            ticker
+            for ticker in current_holdings
+            if ticker in clean.index and float(clean.loc[ticker]) >= cutoff - score_buffer
+        }
+        selected |= keepers
+
+        if len(selected) > n:
+            selected = set(clean.loc[list(selected)].sort_values(ascending=False).head(n).index)
+
+    target = _equal_weight(list(selected))
+    if max_weight > 0 and not target.empty:
+        target = target.clip(upper=max_weight)
+        if target.sum() > 0:
+            target = target / target.sum()
+
+    target = target.reindex(previous.index).fillna(0.0)
+
+    if max_rebalance_turnover is not None and max_rebalance_turnover >= 0:
+        one_way_turnover = float((target - previous).abs().sum() / 2.0)
+        if one_way_turnover > max_rebalance_turnover and one_way_turnover > 1e-12:
+            blend = float(max_rebalance_turnover / one_way_turnover)
+            target = previous + blend * (target - previous)
+            if target.sum() > 0:
+                target = target / target.sum()
+
+    return target
+
+
 def run_tactical_score_backtest(
     *,
     start_date: str = "2024-01-01",
@@ -102,6 +161,8 @@ def run_tactical_score_backtest(
     min_history: int = 180,
     risk_free_rate_annual: float = 0.02,
     max_weight: float = 0.25,
+    v3_score_buffer: float = 0.0,
+    v3_max_rebalance_turnover: float | None = None,
     output_prefix: str = "tactical_backtest",
 ) -> dict[str, Path]:
     params = build_params()
@@ -131,6 +192,7 @@ def run_tactical_score_backtest(
         "tactical_v1_top_n",
         "tactical_v2_top_n",
         "tactical_v3_top_n",
+        "tactical_v3_controlled_top_n",
     ]
 
     weights_by_strategy = {name: pd.Series(dtype=float) for name in strategies}
@@ -168,6 +230,14 @@ def run_tactical_score_backtest(
             weights_by_strategy["tactical_v1_top_n"] = _top_n_weights(table["tactical_score"], n=top_n, max_weight=max_weight)
             weights_by_strategy["tactical_v2_top_n"] = _top_n_weights(table["tactical_score_v2_candidate"], n=top_n, max_weight=max_weight)
             weights_by_strategy["tactical_v3_top_n"] = _top_n_weights(table["tactical_score_v3_candidate"], n=top_n, max_weight=max_weight)
+            weights_by_strategy["tactical_v3_controlled_top_n"] = _top_n_weights_with_controls(
+                score=table["tactical_score_v3_candidate"],
+                previous_weights=last_weights["tactical_v3_controlled_top_n"],
+                n=top_n,
+                max_weight=max_weight,
+                score_buffer=v3_score_buffer,
+                max_rebalance_turnover=v3_max_rebalance_turnover,
+            )
 
             for strategy in strategies:
                 current = weights_by_strategy[strategy].reindex(tickers).fillna(0.0)
@@ -233,6 +303,8 @@ def run_tactical_score_backtest(
         f"rebalance_every: {rebalance_every}",
         f"top_n: {top_n}",
         f"max_weight: {max_weight:.4f}",
+        f"v3_score_buffer: {v3_score_buffer:.4f}",
+        f"v3_max_rebalance_turnover: {v3_max_rebalance_turnover if v3_max_rebalance_turnover is not None else 'none'}",
         f"risk_free_rate_annual: {risk_free_rate_annual:.4f}",
         "",
         "method:",
@@ -240,6 +312,7 @@ def run_tactical_score_backtest(
         "- tactical_v1_top_n holds equal-weight top-N by tactical_score.",
         "- tactical_v2_top_n holds equal-weight top-N by tactical_score_v2_candidate.",
         "- tactical_v3_top_n holds equal-weight top-N by robust constant-weight tactical_score_v3_candidate.",
+        "- tactical_v3_controlled_top_n applies optional score-buffer and turnover-cap controls to v3.",
         "- Direct simulator fees are modeled as zero; turnover is still reported.",
         "- This is a simplified strategy backtest, not a full replay of the production optimizer.",
         "",
