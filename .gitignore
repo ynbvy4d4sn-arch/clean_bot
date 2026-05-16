@@ -53,3 +53,8 @@ __pycache__/
 
 # vendored external repos / local simulator clients
 vendor/
+
+# local secrets
+.env
+.env.*
+credentials.json
