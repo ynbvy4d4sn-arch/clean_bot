@@ -30,6 +30,7 @@ from tactical_forecast import (
     _build_tactical_score_v2_table,
     _build_tactical_score_v3_table,
 )
+from research_tactical_score_v4 import build_v4_feature_scores
 
 try:
     import gurobipy as gp
@@ -50,7 +51,7 @@ class ReplayConfig:
     end_date: str | None = None
     min_history: int = 180
     rebalance_every: int = 1
-    score_name: str = "v3"  # v2 or v3
+    score_name: str = "v3"  # v2, v3, v4 or v4b
     max_weight: float = 0.25
     top_n_gate: int = 8
     risk_free_rate_annual: float = 0.02
@@ -134,21 +135,39 @@ def _load_prices(params: dict[str, object], end_date: str | None) -> pd.DataFram
 def _build_expected_excess(
     table: pd.DataFrame,
     cfg: ReplayConfig,
+    *,
+    v4_today: pd.DataFrame | None = None,
 ) -> pd.Series:
-    table = table.set_index("ticker", drop=False)
+    """Build expected excess-return proxy for the optimizer.
 
-    if cfg.score_name.lower() == "v2":
+    v2/v3 use tactical_forecast score tables.
+    v4/v4b use predictive-feature research scores as score overlays,
+    while still anchoring the expected return proxy to the existing 10d excess-return diagnostic.
+    """
+
+    table = table.set_index("ticker", drop=False)
+    base_table = _build_tactical_score_v3_table(table.reset_index(drop=True)).set_index("ticker")
+    base = base_table.get("excess_expected_return_10d", pd.Series(0.0, index=base_table.index)).astype(float)
+
+    score_name = cfg.score_name.lower()
+    if score_name == "v2":
         scored = _build_tactical_score_v2_table(table.reset_index(drop=True)).set_index("ticker")
         score = scored["tactical_score_v2_candidate"]
-    elif cfg.score_name.lower() == "v3":
-        scored = _build_tactical_score_v3_table(table.reset_index(drop=True)).set_index("ticker")
+    elif score_name == "v3":
+        scored = base_table
         score = scored["tactical_score_v3_candidate"]
+    elif score_name in {"v4", "v4b"}:
+        if v4_today is None or v4_today.empty:
+            raise ValueError("v4_today is required for score_name v4/v4b")
+        scored = v4_today.set_index("ticker")
+        col = "tactical_score_v4_candidate" if score_name == "v4" else "tactical_score_v4b_candidate"
+        score = scored[col].reindex(base.index).fillna(0.0)
     else:
-        raise ValueError("score_name must be v2 or v3")
+        raise ValueError("score_name must be v2, v3, v4 or v4b")
 
-    # Use the score as a cross-sectional expected-return tilt, anchored by 10d excess return.
-    base = scored.get("excess_expected_return_10d", pd.Series(0.0, index=scored.index)).astype(float)
-    score_tilt = cfg.signal_scale * _zscore(score)
+    # Cross-sectional expected-return tilt. Base gives the model a return anchor;
+    # score_tilt lets v2/v3/v4/v4b change ranking/strength.
+    score_tilt = cfg.signal_scale * _zscore(score.reindex(base.index).fillna(0.0))
     expected = (base + score_tilt).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     # Gate to top-N by score, unless top_n_gate <= 0.
@@ -248,6 +267,7 @@ def run_tactical_gurobi_replay(cfg: ReplayConfig) -> dict[str, Path]:
     tickers = list(prices.columns)
     returns = compute_returns(prices).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     all_dates = list(prices.index)
+    v4_panel = build_v4_feature_scores(prices) if cfg.score_name.lower() in {"v4", "v4b"} else pd.DataFrame()
 
     start_ts = pd.Timestamp(cfg.start_date)
     eligible_dates = [
@@ -285,7 +305,16 @@ def run_tactical_gurobi_replay(cfg: ReplayConfig) -> dict[str, Path]:
                 params=params,
                 tickers=tickers,
             )
-            expected = _build_expected_excess(tactical.table, cfg).reindex(tickers).fillna(-1.0)
+            v4_today = (
+                v4_panel[v4_panel["date"].eq(pd.Timestamp(date_ts))]
+                if cfg.score_name.lower() in {"v4", "v4b"} and not v4_panel.empty
+                else None
+            )
+            expected = _build_expected_excess(
+                tactical.table,
+                cfg,
+                v4_today=v4_today,
+            ).reindex(tickers).fillna(-1.0)
             cov = _covariance_matrix(returns, tickers, pos, cfg.covariance_window)
 
             target = _optimize_weights_gurobi(
@@ -423,7 +452,7 @@ def run_tactical_gurobi_replay(cfg: ReplayConfig) -> dict[str, Path]:
 
 def parse_args() -> ReplayConfig:
     parser = argparse.ArgumentParser(description="Run tactical Gurobi allocation replay.")
-    parser.add_argument("--score-name", choices=["v2", "v3"], default="v3")
+    parser.add_argument("--score-name", choices=["v2", "v3", "v4", "v4b"], default="v3")
     parser.add_argument("--rebalance-every", type=int, default=1)
     parser.add_argument("--top-n-gate", type=int, default=6)
     parser.add_argument("--max-weight", type=float, default=0.25)
