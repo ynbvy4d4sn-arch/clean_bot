@@ -34,32 +34,66 @@ CURRENT_WEIGHTS = {
 
 
 def load_latest_prices() -> pd.Series:
+    """Load latest available prices from cache.
+
+    Supports both:
+    - long format: date,ticker,close
+    - wide format: date index column plus ticker columns
+    """
+
     if not PRICE_CACHE_PATH.exists():
         return pd.Series(dtype=float)
 
     df = pd.read_csv(PRICE_CACHE_PATH)
     cols = {c.lower(): c for c in df.columns}
 
+    # Long format.
     if {"date", "ticker", "close"}.issubset(cols):
         date_col = cols["date"]
         ticker_col = cols["ticker"]
         close_col = cols["close"]
-    elif {"date", "symbol", "close"}.issubset(cols):
+        df[date_col] = pd.to_datetime(df[date_col])
+        latest = (
+            df.sort_values(date_col)
+            .groupby(ticker_col)
+            .tail(1)
+            .set_index(ticker_col)[close_col]
+            .astype(float)
+        )
+        return latest
+
+    if {"date", "symbol", "close"}.issubset(cols):
         date_col = cols["date"]
         ticker_col = cols["symbol"]
         close_col = cols["close"]
-    else:
+        df[date_col] = pd.to_datetime(df[date_col])
+        latest = (
+            df.sort_values(date_col)
+            .groupby(ticker_col)
+            .tail(1)
+            .set_index(ticker_col)[close_col]
+            .astype(float)
+        )
+        return latest
+
+    # Wide format, typical project cache:
+    # first column is date-like, remaining columns are tickers.
+    date_col = df.columns[0]
+    wide = df.copy()
+    wide[date_col] = pd.to_datetime(wide[date_col], errors="coerce")
+    wide = wide.dropna(subset=[date_col]).sort_values(date_col)
+    if wide.empty:
         return pd.Series(dtype=float)
 
-    df[date_col] = pd.to_datetime(df[date_col])
-    latest = (
-        df.sort_values(date_col)
-        .groupby(ticker_col)
-        .tail(1)
-        .set_index(ticker_col)[close_col]
-        .astype(float)
-    )
-    return latest
+    # Use the last non-null price per ticker, because some tickers can have NaN on latest row.
+    price_cols = [c for c in wide.columns if c != date_col]
+    prices = {}
+    for col in price_cols:
+        s = pd.to_numeric(wide[col], errors="coerce").dropna()
+        if not s.empty:
+            prices[col] = float(s.iloc[-1])
+
+    return pd.Series(prices, dtype=float)
 
 
 def main() -> None:
