@@ -58,3 +58,6 @@ vendor/
 .env
 .env.*
 credentials.json
+
+# local browser sessions
+.local/
