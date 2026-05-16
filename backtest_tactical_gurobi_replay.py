@@ -129,7 +129,14 @@ def _load_prices(params: dict[str, object], end_date: str | None) -> pd.DataFram
         allow_cache_fallback=True,
         force_refresh=False,
     )
-    return prices.reindex(columns=tickers).sort_index().ffill(limit=3)
+    prices = prices.reindex(columns=tickers).sort_index().ffill(limit=3)
+
+    # Hard end-date filter for subperiod robustness tests.
+    # load_price_data may return cached rows beyond the requested end_date.
+    if end_date is not None:
+        prices = prices.loc[prices.index <= pd.Timestamp(end_date)]
+
+    return prices
 
 
 def _build_expected_excess(

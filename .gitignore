@@ -44,3 +44,9 @@ secrets.*
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# local virtual environments
+.venv/
+venv/
+__pycache__/
+*.pyc
