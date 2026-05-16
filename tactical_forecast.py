@@ -1315,3 +1315,121 @@ def write_tactical_score_v2_outputs(
         "tactical_score_v2_comparison": str(comparison_path),
         "tactical_score_v2_report": str(report_path),
     }
+
+
+TACTICAL_SCORE_V3_WEIGHTS: dict[str, float] = {
+    # Robust candidate 223 from optimize_tactical_weights.py, 500 random trials.
+    # Selection objective: robust 2%-RF Sharpe across train/test split.
+    "excess_expected_return_10d": 0.21066017774082196,
+    "relative_strength_score": -0.13537910011730786,
+    "momentum_10d": -0.13358578798390355,
+    "forecast_confidence": 0.10256507441395955,
+    "trend_score": 0.09747045804801821,
+    "excess_expected_return_3d": 0.06308841546412342,
+    "excess_expected_return_to_project_end": -0.05624748992633874,
+    "vol_5d": 0.054734356212967,
+    "mean_reversion_score": -0.050291162339511586,
+    "momentum_5d": -0.041313276003039884,
+    "vol_adjusted_momentum_20d": -0.02883775503555471,
+    "excess_expected_return_5d": -0.025826946714453437,
+}
+
+
+def _build_tactical_score_v3_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Add robust constant-weight tactical score v3 candidate.
+
+    This score is derived from optimize_tactical_weights.py candidate 223.
+    It is report-only and does not alter final production orders.
+    """
+
+    out = _build_tactical_score_v2_table(table)
+
+    score = pd.Series(0.0, index=out.index, dtype=float)
+    for feature, weight in TACTICAL_SCORE_V3_WEIGHTS.items():
+        if feature not in out.columns:
+            continue
+        score = score + float(weight) * _zscore(out[feature].astype(float))
+
+    out["tactical_score_v3_candidate"] = score.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    out["tactical_rank_v3_candidate"] = out["tactical_score_v3_candidate"].rank(
+        ascending=False,
+        method="dense",
+    ).astype(int)
+    return out
+
+
+def write_tactical_score_v3_outputs(
+    *,
+    tactical_forecast: TacticalForecastResult,
+    output_dir: str | Path,
+) -> dict[str, str]:
+    """Write report-only tactical score v3 candidate outputs."""
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    current_path = output_path / "tactical_score_v3_current.csv"
+    report_path = output_path / "tactical_score_v3_report.txt"
+
+    table = _build_tactical_score_v3_table(tactical_forecast.table)
+
+    keep_cols = [
+        "ticker",
+        "tactical_rank",
+        "tactical_score",
+        "tactical_rank_v2_candidate",
+        "tactical_score_v2_candidate",
+        "tactical_rank_v3_candidate",
+        "tactical_score_v3_candidate",
+        "expected_return_3d",
+        "expected_return_5d",
+        "expected_return_10d",
+        "excess_expected_return_3d",
+        "excess_expected_return_5d",
+        "excess_expected_return_10d",
+        "risk_adjusted_forecast",
+        "forecast_confidence",
+        "trend_score",
+        "momentum_5d",
+        "momentum_10d",
+        "relative_strength_score",
+        "vol_5d",
+        "reason",
+    ]
+    cols = [col for col in keep_cols if col in table.columns]
+    table.loc[:, cols].sort_values("tactical_score_v3_candidate", ascending=False).to_csv(current_path, index=False)
+
+    lines = [
+        "Tactical Score v3 Candidate Report",
+        "",
+        "status: report_only_no_order_change",
+        "source: optimize_tactical_weights.py candidate 223",
+        "selection: robust train/test 2%-RF Sharpe",
+        "",
+        "method:",
+        "- Applies fixed constant feature weights learned from historical tactical weight search.",
+        "- Uses cross-sectional z-scores per feature.",
+        "- Uses excess-return diagnostics with 2% annual risk-free rate where applicable.",
+        "- This report does not alter final Daily Bot orders.",
+        "",
+        "weights:",
+    ]
+
+    for feature, weight in sorted(TACTICAL_SCORE_V3_WEIGHTS.items(), key=lambda item: abs(item[1]), reverse=True):
+        lines.append(f"- {feature}: {weight:+.6f}")
+
+    lines.extend(["", "current_top_v3_assets:"])
+    for row in table.sort_values("tactical_score_v3_candidate", ascending=False).head(12).itertuples(index=False):
+        lines.append(
+            f"- {row.ticker}: v3_rank={row.tactical_rank_v3_candidate}, "
+            f"v3_score={row.tactical_score_v3_candidate:.4f}, "
+            f"v2_rank={row.tactical_rank_v2_candidate}, "
+            f"v1_rank={row.tactical_rank}"
+        )
+
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    return {
+        "tactical_score_v3_current": str(current_path),
+        "tactical_score_v3_report": str(report_path),
+    }

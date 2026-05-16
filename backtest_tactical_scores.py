@@ -15,7 +15,11 @@ import pandas as pd
 from config import build_params
 from data import load_price_data
 from features import compute_returns
-from tactical_forecast import build_multi_horizon_forecast, _build_tactical_score_v2_table
+from tactical_forecast import (
+    build_multi_horizon_forecast,
+    _build_tactical_score_v2_table,
+    _build_tactical_score_v3_table,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -126,6 +130,7 @@ def run_tactical_score_backtest(
         "equal_weight",
         "tactical_v1_top_n",
         "tactical_v2_top_n",
+        "tactical_v3_top_n",
     ]
 
     weights_by_strategy = {name: pd.Series(dtype=float) for name in strategies}
@@ -156,12 +161,13 @@ def run_tactical_score_backtest(
                 params=params,
                 tickers=tickers,
             )
-            table = _build_tactical_score_v2_table(tactical.table).set_index("ticker")
+            table = _build_tactical_score_v3_table(tactical.table).set_index("ticker")
 
             weights_by_strategy["sgov_cash"] = pd.Series({"SGOV": 1.0}, dtype=float) if "SGOV" in tickers else _equal_weight(tickers)
             weights_by_strategy["equal_weight"] = _equal_weight(tickers)
             weights_by_strategy["tactical_v1_top_n"] = _top_n_weights(table["tactical_score"], n=top_n, max_weight=max_weight)
             weights_by_strategy["tactical_v2_top_n"] = _top_n_weights(table["tactical_score_v2_candidate"], n=top_n, max_weight=max_weight)
+            weights_by_strategy["tactical_v3_top_n"] = _top_n_weights(table["tactical_score_v3_candidate"], n=top_n, max_weight=max_weight)
 
             for strategy in strategies:
                 current = weights_by_strategy[strategy].reindex(tickers).fillna(0.0)
@@ -233,6 +239,7 @@ def run_tactical_score_backtest(
         "- Rebalances every N trading days using only data available up to that date.",
         "- tactical_v1_top_n holds equal-weight top-N by tactical_score.",
         "- tactical_v2_top_n holds equal-weight top-N by tactical_score_v2_candidate.",
+        "- tactical_v3_top_n holds equal-weight top-N by robust constant-weight tactical_score_v3_candidate.",
         "- Direct simulator fees are modeled as zero; turnover is still reported.",
         "- This is a simplified strategy backtest, not a full replay of the production optimizer.",
         "",
