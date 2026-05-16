@@ -25,6 +25,11 @@ PRICE_CACHE_PATH = ROOT / "data" / "prices_cache.csv"
 # Preview-only default NAV. This is not actual broker NAV.
 DEFAULT_NAV_USD = 100_000.0
 
+# Order-preview safety settings.
+MIN_ORDER_USD = 100.0
+MAX_ORDER_USD = 25_000.0
+ROUND_TO_WHOLE_SHARES = True
+
 # Replace this later with real simulator positions.
 CURRENT_WEIGHTS = {
     # Example: empty portfolio / all cash for first preview.
@@ -124,10 +129,31 @@ def main() -> None:
         dollar_delta = delta_weight * nav
 
         px = prices.loc[ticker] if ticker in prices.index else float("nan")
-        shares = dollar_delta / px if pd.notna(px) and px > 0 else float("nan")
+        raw_shares = dollar_delta / px if pd.notna(px) and px > 0 else float("nan")
 
+        if pd.notna(raw_shares) and ROUND_TO_WHOLE_SHARES:
+            estimated_shares = float(int(abs(raw_shares))) * (1.0 if raw_shares >= 0 else -1.0)
+        else:
+            estimated_shares = raw_shares
+
+        rounded_dollar_delta = estimated_shares * px if pd.notna(estimated_shares) and pd.notna(px) else float("nan")
+
+        reject_reason = ""
         if abs(delta_weight) < 1e-6:
             action = "HOLD"
+            reject_reason = "below_weight_threshold"
+        elif pd.isna(px) or px <= 0:
+            action = "REJECT"
+            reject_reason = "missing_or_invalid_price"
+        elif abs(dollar_delta) < MIN_ORDER_USD:
+            action = "REJECT"
+            reject_reason = "below_min_order_usd"
+        elif abs(dollar_delta) > MAX_ORDER_USD + 1e-9:
+            action = "REJECT"
+            reject_reason = "above_max_order_usd"
+        elif ROUND_TO_WHOLE_SHARES and abs(estimated_shares) < 1:
+            action = "REJECT"
+            reject_reason = "rounds_to_zero_shares"
         elif delta_weight > 0:
             action = "BUY"
         else:
@@ -144,7 +170,10 @@ def main() -> None:
                 "preview_nav_usd": nav,
                 "dollar_delta": dollar_delta,
                 "latest_price": px,
-                "estimated_shares": shares,
+                "raw_estimated_shares": raw_shares,
+                "estimated_shares": estimated_shares,
+                "rounded_dollar_delta": rounded_dollar_delta,
+                "reject_reason": reject_reason,
             }
         )
 
@@ -153,7 +182,10 @@ def main() -> None:
     report_path = OUTPUT_DIR / "paper_order_preview_report.txt"
     out.to_csv(order_path, index=False)
 
-    actionable = out[out["action"].ne("HOLD")].copy()
+    actionable = out[out["action"].isin(["BUY", "SELL"])].copy()
+    rejected = out[out["action"].eq("REJECT")].copy()
+    rounded_cash_impact = float(actionable["rounded_dollar_delta"].sum()) if "rounded_dollar_delta" in actionable else 0.0
+    preview_cash_remaining = nav - rounded_cash_impact
 
     lines = [
         "Paper Order Preview Report",
@@ -162,6 +194,11 @@ def main() -> None:
         "candidate: v3_lower_turnover",
         f"target_allocation_date: {latest_date}",
         f"preview_nav_usd: {nav:.2f}",
+        f"min_order_usd: {MIN_ORDER_USD:.2f}",
+        f"max_order_usd: {MAX_ORDER_USD:.2f}",
+        f"round_to_whole_shares: {ROUND_TO_WHOLE_SHARES}",
+        f"rounded_cash_impact: {rounded_cash_impact:.2f}",
+        f"preview_cash_remaining: {preview_cash_remaining:.2f}",
         "",
         "important:",
         "- This report does not send simulator or broker orders.",
@@ -177,13 +214,26 @@ def main() -> None:
             lines.append(f"- {ticker}: {weight:.4f}")
 
     lines.extend(["", "preview_orders:"])
+    if actionable.empty:
+        lines.append("- none")
     for row in actionable.itertuples(index=False):
         lines.append(
             f"- {row.action} {row.ticker}: "
             f"delta_weight={row.delta_weight:+.4f}, "
             f"dollar_delta={row.dollar_delta:+.2f}, "
-            f"price={row.latest_price}, "
-            f"estimated_shares={row.estimated_shares}"
+            f"price={row.latest_price:.4f}, "
+            f"shares={row.estimated_shares:.0f}, "
+            f"rounded_dollar_delta={row.rounded_dollar_delta:+.2f}"
+        )
+
+    lines.extend(["", "rejected_orders:"])
+    if rejected.empty:
+        lines.append("- none")
+    for row in rejected.itertuples(index=False):
+        lines.append(
+            f"- {row.ticker}: action={row.action}, "
+            f"dollar_delta={row.dollar_delta:+.2f}, "
+            f"reason={row.reject_reason}"
         )
 
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
