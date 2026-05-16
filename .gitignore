@@ -61,3 +61,6 @@ credentials.json
 
 # local browser sessions
 .local/
+
+# local browser sessions
+.local/
