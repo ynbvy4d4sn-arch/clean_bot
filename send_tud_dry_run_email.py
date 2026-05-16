@@ -212,6 +212,8 @@ def main() -> None:
             body=body,
             recipient=str(settings.get("EMAIL_RECIPIENT", "") or settings.get("EMAIL_TO", "")).strip(),
             settings=settings,
+            dry_run=bool(gate.get("email_dry_run", True)),
+            gate_status=gate,
         )
         result.update(send_result)
         result["attempted"] = bool(send_result.get("attempted", False))
