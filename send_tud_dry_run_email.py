@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 from notifications import load_email_settings, send_email_notification
 from config import get_email_gate_status
+from email_visual_report import build_tud_visual_email
 
 
 ROOT = Path(__file__).resolve().parent
@@ -181,15 +182,44 @@ def main() -> None:
     args = parser.parse_args()
 
     subject, body, meta = build_subject_and_body()
-    body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    try:
+        html_body, visual_plain_body = build_tud_visual_email()
+        body = visual_plain_body + "\n\n--- Detailed raw report ---\n\n" + body
+    except Exception as exc:
+        html_body = ""
+        body = body + f"\n\n[visual report unavailable: {type(exc).__name__}: {exc}]\n"
+
+    body_hash = hashlib.sha256((body + html_body).encode("utf-8")).hexdigest()
 
     SUBJECT_OUT.write_text(subject + "\n", encoding="utf-8")
     BODY_OUT.write_text(body, encoding="utf-8")
+    (OUTPUT_DIR / "tud_dry_run_email_body.html").write_text(html_body, encoding="utf-8")
 
     state = load_state()
     duplicate = state.get("last_body_hash") == body_hash
 
     settings = load_email_settings()
+
+    # Overlay live environment gates so one-off CLI runs can enable/disable sending
+    # without editing persisted config files.
+    for key in [
+        "ENABLE_EMAIL_NOTIFICATIONS",
+        "EMAIL_SEND_ENABLED",
+        "EMAIL_DRY_RUN",
+        "USER_CONFIRMED_EMAIL_PHASE",
+        "PHASE",
+        "EMAIL_PROVIDER",
+        "EMAIL_RECIPIENT",
+        "EMAIL_TO",
+        "EMAIL_SENDER",
+        "EMAIL_FROM",
+        "BREVO_API_KEY",
+        "EMAIL_API_KEY",
+    ]:
+        if key in __import__("os").environ:
+            settings[key] = __import__("os").environ[key]
+
     gate = get_email_gate_status(settings)
 
     result = {
@@ -210,6 +240,7 @@ def main() -> None:
         send_result = send_email_notification(
             subject=subject,
             body=body,
+            html_body=html_body,
             recipient=str(settings.get("EMAIL_RECIPIENT", "") or settings.get("EMAIL_TO", "")).strip(),
             settings=settings,
             dry_run=bool(gate.get("email_dry_run", True)),
