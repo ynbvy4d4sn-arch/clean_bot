@@ -50,3 +50,6 @@ __pycache__/
 venv/
 __pycache__/
 *.pyc
+
+# vendored external repos / local simulator clients
+vendor/
