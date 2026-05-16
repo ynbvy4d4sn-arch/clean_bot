@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "outputs"
 ALLOC_PATH = OUTPUT_DIR / "paper_preview_candidate_v3_lower_turnover_allocations.csv"
 PRICE_CACHE_PATH = ROOT / "data" / "prices_cache.csv"
+POSITIONS_PATH = ROOT / "config" / "paper_positions.csv"
 
 # Preview-only default NAV. This is not actual broker NAV.
 DEFAULT_NAV_USD = 100_000.0
@@ -30,12 +31,52 @@ MIN_ORDER_USD = 100.0
 MAX_ORDER_USD = 25_000.0
 ROUND_TO_WHOLE_SHARES = True
 
-# Replace this later with real simulator positions.
-CURRENT_WEIGHTS = {
-    # Example: empty portfolio / all cash for first preview.
-    # "XLK": 0.10,
-    # "SGOV": 0.90,
-}
+# Fallback only. Preferred input is config/paper_positions.csv.
+CURRENT_WEIGHTS = {}
+
+
+def load_current_positions(prices: pd.Series, nav: float) -> tuple[pd.Series, float, str]:
+    """Load current paper positions from config/paper_positions.csv.
+
+    Expected columns:
+    - ticker
+    - shares
+
+    Optional:
+    - cash_usd row as ticker CASH or column cash_usd is not required yet.
+
+    If the file is empty/missing, fall back to CURRENT_WEIGHTS.
+    """
+
+    if POSITIONS_PATH.exists():
+        pos = pd.read_csv(POSITIONS_PATH)
+        if not pos.empty and {"ticker", "shares"}.issubset(pos.columns):
+            pos["ticker"] = pos["ticker"].astype(str).str.upper().str.strip()
+            pos["shares"] = pd.to_numeric(pos["shares"], errors="coerce").fillna(0.0)
+
+            cash_rows = pos[pos["ticker"].isin(["CASH", "USD"])]
+            cash_usd = float(cash_rows["shares"].sum()) if not cash_rows.empty else 0.0
+
+            holdings = pos[~pos["ticker"].isin(["CASH", "USD"])].copy()
+            holdings = holdings.groupby("ticker", as_index=True)["shares"].sum()
+
+            values = {}
+            for ticker, shares in holdings.items():
+                px = prices.get(ticker, float("nan"))
+                if pd.notna(px) and px > 0:
+                    values[ticker] = float(shares) * float(px)
+
+            gross_value = float(sum(values.values()) + cash_usd)
+            effective_nav = gross_value if gross_value > 0 else nav
+            weights = pd.Series(values, dtype=float) / effective_nav if values else pd.Series(dtype=float)
+
+            source = f"positions_file:{POSITIONS_PATH}"
+            return weights, effective_nav, source
+
+    if CURRENT_WEIGHTS:
+        return pd.Series(CURRENT_WEIGHTS, dtype=float), nav, "CURRENT_WEIGHTS"
+
+    return pd.Series(dtype=float), nav, "empty_all_cash"
 
 
 def load_latest_prices() -> pd.Series:
@@ -114,12 +155,14 @@ def main() -> None:
         .sort_values(ascending=False)
     )
 
-    tickers = sorted(set(target.index) | set(CURRENT_WEIGHTS))
-    current = pd.Series(CURRENT_WEIGHTS, index=tickers, dtype=float).fillna(0.0)
+    prices_all = load_latest_prices()
+    current_loaded, nav, current_source = load_current_positions(prices_all, DEFAULT_NAV_USD)
+
+    tickers = sorted(set(target.index) | set(current_loaded.index))
+    current = current_loaded.reindex(tickers).fillna(0.0)
     target = target.reindex(tickers).fillna(0.0)
 
-    prices = load_latest_prices().reindex(tickers)
-    nav = DEFAULT_NAV_USD
+    prices = prices_all.reindex(tickers)
 
     rows = []
     for ticker in tickers:
@@ -194,6 +237,7 @@ def main() -> None:
         "candidate: v3_lower_turnover",
         f"target_allocation_date: {latest_date}",
         f"preview_nav_usd: {nav:.2f}",
+        f"current_position_source: {current_source}",
         f"min_order_usd: {MIN_ORDER_USD:.2f}",
         f"max_order_usd: {MAX_ORDER_USD:.2f}",
         f"round_to_whole_shares: {ROUND_TO_WHOLE_SHARES}",
@@ -202,8 +246,9 @@ def main() -> None:
         "",
         "important:",
         "- This report does not send simulator or broker orders.",
-        "- Current positions are currently assumed as empty/all-cash unless CURRENT_WEIGHTS is edited.",
-        "- Next step is replacing CURRENT_WEIGHTS with real simulator positions.",
+        "- This report uses config/paper_positions.csv when present.",
+        "- If config/paper_positions.csv is empty, current positions are assumed empty/all-cash.",
+        "- Next step is replacing config/paper_positions.csv with real simulator export.",
         "",
         "target_allocation:",
     ]
